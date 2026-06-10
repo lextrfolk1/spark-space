@@ -1,0 +1,50 @@
+app:
+  name: Execution Workspace
+  environment: development
+  host: 0.0.0.0
+  port: 8000
+
+execution:
+  timeout_ms: 60000
+  max_rows: 1000
+  default_limit: 100
+
+upload:
+  enabled: true
+  max_file_size_mb: 100
+  allowed_extensions:
+    - csv
+    - json
+    - parquet
+
+datasource:
+  allow_runtime_creation: true
+  configured_connections:
+    - id: spark_local
+      name: Spark Local
+      type: SPARK
+      host: spark
+      port: 7077
+      database: default
+      schema_name: default
+      jdbc_url:
+      runtime_managed: false
+    - id: postgres_local
+      name: Metadata PostgreSQL
+      type: POSTGRESQL
+      host: postgres
+      port: 5432
+      database: workspace
+      schema_name: public
+      jdbc_url: postgresql://workspace:***@postgres:5432/workspace
+      runtime_managed: false
+
+rule_engine:
+  enabled: false
+
+storage:
+  provider: local
+  bucket: datasets
+  local_path: /app/data/storage
+  upload_path: /app/data/uploads
+
