@@ -105,6 +105,9 @@ export function ConnectionsPage() {
               />
             </Field>
           </div>
+          <p className="text-xs text-muted">
+            If the backend is running in Docker and the database is on your machine, use `host.docker.internal` instead of `localhost`.
+          </p>
           <div className="grid gap-4 md:grid-cols-2">
             <Field label="Database">
               <Input value={draft.database} onChange={(event) => setDraft({ ...draft, database: event.target.value })} />
