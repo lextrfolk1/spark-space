@@ -1,24 +1,30 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
 import re
 import sqlite3
 import time
 from dataclasses import dataclass
 from typing import Any, Protocol
+from urllib.parse import urlparse
 
+import asyncpg
 import pandas as pd
+from pyspark.sql import SparkSession
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import ConfiguredDatasource, RuntimeSettings
+from app.core.security import CredentialCipher
 from app.models.entities import DatasetRecord, DatasourceRecord, ExecutionRecord
 from app.schemas.executions import ExecutionRequest, ExecutionResponse
 from app.services.logbook import log_book
 
 _READ_ONLY_SQL = re.compile(r"^\s*(select|with)\b", re.IGNORECASE)
 _SINGLE_EQUALS = re.compile(r"(?<![<>=!])=(?!=)")
+_SPARK_SESSIONS: dict[str, SparkSession] = {}
 
 
 @dataclass
@@ -76,12 +82,6 @@ class SparkSqlExecutor:
         if not plan.command:
             return _failed_payload("No SQL command provided.", "Command cannot be empty", engine="spark_sql")
 
-        if not plan.datasets:
-            message = "Select at least one registered dataset before running Spark SQL."
-            if plan.datasource is not None:
-                message = "Live datasource execution is not implemented yet. Select a registered dataset to run locally."
-            return _failed_payload(message, message, engine="spark_sql")
-
         if not _READ_ONLY_SQL.match(plan.command):
             return _failed_payload(
                 "Only read-only SELECT statements are supported in the local Spark SQL runner.",
@@ -91,10 +91,51 @@ class SparkSqlExecutor:
 
         logs = ["Execution routed through SparkSqlExecutor."]
         warnings: list[str] = []
-        if plan.datasource is not None:
+        if plan.datasource is not None and plan.datasets:
             warnings.append(
                 f"Validated datasource `{plan.datasource.name}` but executed against selected registered datasets in local mode."
             )
+
+        if plan.datasource is not None and not plan.datasets:
+            try:
+                result_frame, live_statistics = await _execute_live_sql(plan, plan.command, plan.limit)
+            except Exception as exc:
+                return _failed_payload(
+                    "Spark SQL execution failed against the live datasource.",
+                    str(exc),
+                    engine="spark_sql",
+                    logs=logs,
+                    warnings=warnings,
+                )
+
+            datasource_name = plan.datasource.name
+            return ExecutionPayload(
+                status="completed",
+                schema=_schema_from_frame(result_frame),
+                rows=_rows_from_frame(result_frame),
+                logs=logs
+                + [
+                    f"Connected to live datasource `{datasource_name}`.",
+                    "SQL query completed against the remote database.",
+                ],
+                warnings=warnings,
+                error=None,
+                statistics={
+                    "engine": "spark_sql",
+                    "mode": "live_datasource",
+                    "datasource": datasource_name,
+                    **live_statistics,
+                },
+                dataframe_metadata={"normalized": True, "localExecution": False},
+            )
+
+        if not plan.datasets:
+            return _failed_payload(
+                "Select at least one registered dataset or choose a supported datasource before running Spark SQL.",
+                "No dataset or executable datasource was provided.",
+                engine="spark_sql",
+            )
+
         try:
             result_frame = _execute_local_sql(plan, plan.command, plan.limit)
         except Exception as exc:  # pragma: no cover - exercised through tests, sqlite/pandas error types vary
@@ -416,7 +457,7 @@ class ExecutionService:
                 datasource=datasource,
                 limit=execution_limit,
                 execution_mode=parsed.execution_mode,
-                context={**parsed.context, **preview_context},
+                context={**parsed.context, **preview_context, **self._build_datasource_context(datasource)},
             )
             payload = await self.registry.get_executor(request.engine).execute(plan)
         duration_ms = int((time.perf_counter() - started) * 1000)
@@ -505,6 +546,33 @@ class ExecutionService:
             schemas[dataset.id] = _schema_from_frame(preview_frame)
         return {"dataset_previews": previews, "dataset_schemas": schemas, "dataset_frames": frames}
 
+    def _build_datasource_context(self, datasource: DatasourceRecord | ConfiguredDatasource | None) -> dict[str, Any]:
+        if datasource is None:
+            return {}
+
+        if isinstance(datasource, DatasourceRecord):
+            cipher = CredentialCipher(self.settings.app_credential_key)
+            return {
+                "live_datasource": {
+                    "name": datasource.name,
+                    "type": datasource.type,
+                    "host": datasource.host,
+                    "hosts": _candidate_hosts(datasource.host),
+                    "port": datasource.port,
+                    "database": datasource.database,
+                    "schema_name": datasource.schema_name,
+                    "username": datasource.username,
+                    "password": cipher.decrypt(datasource.encrypted_password),
+                    "runtime_managed": True,
+                }
+            }
+
+        configured = datasource.model_dump()
+        configured["hosts"] = _candidate_hosts(datasource.host)
+        credentials = _configured_postgres_credentials(self.settings, datasource)
+        configured.update(credentials)
+        return {"live_datasource": configured}
+
 
 def _schema_from_frame(frame: pd.DataFrame) -> list[dict[str, Any]]:
     return [{"name": name, "type": str(dtype)} for name, dtype in frame.dtypes.items()]
@@ -512,6 +580,132 @@ def _schema_from_frame(frame: pd.DataFrame) -> list[dict[str, Any]]:
 
 def _rows_from_frame(frame: pd.DataFrame) -> list[dict[str, Any]]:
     return json.loads(frame.to_json(orient="records", date_format="iso"))
+
+
+def _candidate_hosts(host: str) -> list[str]:
+    normalized = host.strip()
+    hosts = [normalized]
+    if normalized in {"localhost", "127.0.0.1", "::1"}:
+        hosts.append("host.docker.internal")
+    return hosts
+
+
+def _configured_postgres_credentials(settings: RuntimeSettings, datasource: ConfiguredDatasource) -> dict[str, Any]:
+    if datasource.type != "POSTGRESQL":
+        return {"username": None, "password": None}
+
+    parsed = urlparse(settings.database_url)
+    db_scheme = parsed.scheme.split("+")[-1]
+    db_port = parsed.port or 5432
+    db_name = parsed.path.lstrip("/") or None
+    if db_scheme != "asyncpg":
+        return {"username": None, "password": None}
+
+    if parsed.hostname == datasource.host and db_port == datasource.port and db_name == datasource.database:
+        return {
+            "username": parsed.username,
+            "password": parsed.password,
+        }
+    return {"username": None, "password": None}
+
+
+async def _execute_live_sql(plan: ExecutionPlan, query: str, limit: int) -> tuple[pd.DataFrame, dict[str, Any]]:
+    datasource: dict[str, Any] | None = plan.context.get("live_datasource")
+    if datasource is None:
+        raise ValueError("Datasource context is missing for live execution.")
+
+    datasource_type = (datasource.get("type") or "").upper()
+    if datasource_type == "SPARK":
+        return await _execute_spark_connect_sql(plan, datasource, query, limit)
+
+    if datasource_type != "POSTGRESQL":
+        raise ValueError(f"Live datasource execution currently supports POSTGRESQL only, not `{datasource_type}`.")
+
+    username = datasource.get("username")
+    password = datasource.get("password")
+    database = datasource.get("database")
+    if not username or password is None or not database:
+        raise ValueError(
+            "This datasource does not have executable credentials in the backend yet. "
+            "Create it as a runtime-managed PostgreSQL connection with username and password."
+        )
+
+    last_error: Exception | None = None
+    for host in datasource.get("hosts") or [datasource.get("host")]:
+        connection: asyncpg.Connection | None = None
+        try:
+            connection = await asyncpg.connect(
+                host=host,
+                port=datasource.get("port"),
+                user=username,
+                password=password,
+                database=database,
+                timeout=3,
+            )
+            schema_name = datasource.get("schema_name")
+            if schema_name:
+                await connection.fetchval("SELECT set_config('search_path', $1, false)", schema_name)
+
+            stripped_query = query.strip().rstrip(";")
+            limited_query = f"SELECT * FROM ({stripped_query}) AS workspace_result LIMIT {limit}"
+            statement = await connection.prepare(limited_query)
+            records = await statement.fetch()
+            rows = [dict(record) for record in records]
+            frame = pd.DataFrame(rows)
+            if rows:
+                frame = frame.reindex(columns=list(rows[0].keys()))
+            else:
+                frame = pd.DataFrame(columns=[attribute.name for attribute in statement.get_attributes()])
+            return frame, {"host": host, "returnedRows": len(rows)}
+        except Exception as exc:  # pragma: no cover - network/database errors vary
+            last_error = exc
+        finally:
+            if connection is not None:
+                await connection.close()
+
+    if last_error is not None:
+        raise ValueError(str(last_error)) from last_error
+    raise ValueError("Unable to connect to the live datasource.")
+
+
+async def _execute_spark_connect_sql(
+    plan: ExecutionPlan,
+    datasource: dict[str, Any],
+    query: str,
+    limit: int,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    last_error: Exception | None = None
+    for host in datasource.get("hosts") or [datasource.get("host")]:
+        remote = f"sc://{host}:{datasource.get('port')}"
+        try:
+            spark = await asyncio.to_thread(_get_spark_connect_session, remote, datasource)
+            result_frame = await asyncio.to_thread(_run_spark_sql, spark, query, limit)
+            return result_frame, {"host": host, "mode": "spark_connect", "returnedRows": len(result_frame.index)}
+        except Exception as exc:  # pragma: no cover - Spark client errors vary
+            last_error = exc
+
+    if last_error is not None:
+        raise ValueError(str(last_error)) from last_error
+    raise ValueError("Unable to connect to the Spark datasource.")
+
+
+def _get_spark_connect_session(remote: str, datasource: dict[str, Any]) -> SparkSession:
+    existing = _SPARK_SESSIONS.get(remote)
+    if existing is not None:
+        return existing
+
+    builder = SparkSession.builder.remote(remote).appName("execution-workspace")
+    session = builder.getOrCreate()
+    _SPARK_SESSIONS[remote] = session
+    return session
+
+
+def _run_spark_sql(spark: SparkSession, query: str, limit: int) -> pd.DataFrame:
+    dataframe = spark.sql(query.strip().rstrip(";")).limit(limit)
+    pandas_frame = dataframe.toPandas()
+    if pandas_frame.empty:
+        pandas_frame = pd.DataFrame(columns=dataframe.columns)
+    return pandas_frame
 
 
 def _execute_local_sql(plan: ExecutionPlan, query: str, limit: int) -> pd.DataFrame:

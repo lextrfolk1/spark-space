@@ -24,10 +24,10 @@ datasource:
       name: Spark Local
       type: SPARK
       host: spark
-      port: 7077
+      port: 15002
       database: default
       schema_name: default
-      jdbc_url:
+      jdbc_url: sc://spark:15002
       runtime_managed: false
     - id: postgres_local
       name: Metadata PostgreSQL
@@ -47,4 +47,3 @@ storage:
   bucket: datasets
   local_path: /app/data/storage
   upload_path: /app/data/uploads
-
