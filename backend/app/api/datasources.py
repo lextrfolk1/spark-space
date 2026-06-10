@@ -10,6 +10,7 @@ from app.schemas.datasources import (
     DatasourceResponse,
     DatasourceTestRequest,
     DatasourceTestResponse,
+    DatasourceUpdate,
 )
 from app.services.connectors.tester import test_connection
 from app.services.datasources import DatasourceService
@@ -45,9 +46,22 @@ async def test_datasource(payload: DatasourceTestRequest) -> DatasourceTestRespo
     return result
 
 
+@router.put("/{datasource_id}", response_model=DatasourceResponse)
+async def update_datasource(
+    datasource_id: str,
+    payload: DatasourceUpdate,
+    session: AsyncSession = Depends(get_db_session),
+) -> DatasourceResponse:
+    service = DatasourceService(get_settings())
+    datasource = await service.update(session, datasource_id, payload)
+    if datasource is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Datasource not found")
+    log_book.add("datasource", "info", f"Datasource updated: {datasource.name}")
+    return datasource
+
+
 @router.delete("/{datasource_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_datasource(datasource_id: str, session: AsyncSession = Depends(get_db_session)) -> None:
     service = DatasourceService(get_settings())
     await service.delete(session, datasource_id)
     log_book.add("datasource", "info", f"Datasource deleted: {datasource_id}")
-

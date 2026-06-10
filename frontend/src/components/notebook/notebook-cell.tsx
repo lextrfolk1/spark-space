@@ -1,10 +1,13 @@
 import { startTransition, useMemo, useState } from "react";
 import Editor from "@monaco-editor/react";
 import {
+  Braces,
   ChevronDown,
   ChevronUp,
   Copy,
+  Database,
   Play,
+  Rows3,
   RotateCcw,
   Trash2,
 } from "lucide-react";
@@ -24,6 +27,39 @@ type NotebookCellProps = {
   onMove: (direction: "up" | "down") => void;
 };
 
+const engineMeta: Record<
+  NotebookCell["engine"],
+  {
+    label: string;
+    language: "sql" | "python";
+    hint: string;
+    datasetLabel: string;
+    accentClass: string;
+  }
+> = {
+  spark_sql: {
+    label: "Spark SQL",
+    language: "sql",
+    hint: "Use SQL against the selected dataset or connection.",
+    datasetLabel: "Primary dataset",
+    accentClass: "bg-emerald-300 text-slate-950",
+  },
+  spark_dataframe: {
+    label: "Spark DataFrame",
+    language: "python",
+    hint: "Write DataFrame-style Python against the selected dataset context.",
+    datasetLabel: "Input dataset",
+    accentClass: "bg-sky-300 text-slate-950",
+  },
+  rule_engine: {
+    label: "Rule Engine",
+    language: "python",
+    hint: "Placeholder engine path for future rule execution planning.",
+    datasetLabel: "Rule input",
+    accentClass: "bg-amber-300 text-slate-950",
+  },
+};
+
 export function NotebookCellView({
   cell,
   datasets,
@@ -34,6 +70,7 @@ export function NotebookCellView({
   onMove,
 }: NotebookCellProps) {
   const [activeTab, setActiveTab] = useState<(typeof resultTabs)[number]>("results");
+  const meta = engineMeta[cell.engine];
   const selectedDatasets = datasets.filter((dataset) => cell.datasetIds.includes(dataset.id));
   const currentDatasource = datasources.find((item) => item.id === cell.datasourceId);
 
@@ -139,9 +176,12 @@ export function NotebookCellView({
         <div className="flex flex-wrap items-center gap-3">
           <div>
             <p className="font-display text-lg">{cell.title}</p>
-            <p className="text-xs uppercase tracking-[0.22em] text-muted">{cell.engine.replace("_", " ")}</p>
+            <p className="text-xs uppercase tracking-[0.22em] text-muted">{meta.label}</p>
           </div>
           <div className="ml-auto flex items-center gap-2">
+            <span className={`rounded-full px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.2em] ${meta.accentClass}`}>
+              {meta.label}
+            </span>
             <span
               className={[
                 "rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em]",
@@ -160,7 +200,10 @@ export function NotebookCellView({
             </Button>
           </div>
         </div>
-        <div className="mt-4 grid gap-3 xl:grid-cols-4">
+        <div className="mt-3 flex flex-wrap gap-2 text-xs text-muted">
+          <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">{meta.hint}</span>
+        </div>
+        <div className="mt-4 grid gap-3 xl:grid-cols-[180px_1fr_1fr_170px]">
           <Select value={cell.engine} onChange={(event) => onChange({ engine: event.target.value as NotebookCell["engine"] })}>
             <option value="spark_sql">Spark SQL</option>
             <option value="spark_dataframe">Spark DataFrame</option>
@@ -178,7 +221,7 @@ export function NotebookCellView({
             value={cell.datasetIds[0] ?? ""}
             onChange={(event) => onChange({ datasetIds: event.target.value ? [event.target.value] : [] })}
           >
-            <option value="">Select dataset</option>
+            <option value="">{meta.datasetLabel}</option>
             {datasetOptions.map((option) => (
               <option key={option.id} value={option.id}>
                 {option.label}
@@ -196,17 +239,26 @@ export function NotebookCellView({
           </div>
         </div>
         <div className="mt-3 flex flex-wrap gap-2 text-xs text-muted">
-          <span>Selected datasets: {selectedDatasets.map((dataset) => dataset.name).join(", ") || "None"}</span>
-          <span>Datasource: {currentDatasource?.name || "Unbound"}</span>
-          <span>Duration: {cell.durationMs ? `${cell.durationMs} ms` : "N/A"}</span>
+          <span className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/5 px-3 py-1">
+            <Database size={12} />
+            {selectedDatasets.map((dataset) => dataset.name).join(", ") || "No dataset"}
+          </span>
+          <span className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/5 px-3 py-1">
+            <Braces size={12} />
+            {currentDatasource?.name || "No datasource"}
+          </span>
+          <span className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/5 px-3 py-1">
+            <Rows3 size={12} />
+            {cell.durationMs ? `${cell.durationMs} ms` : "Not run"}
+          </span>
         </div>
       </div>
       {!cell.collapsed && (
-        <div className="grid gap-0 xl:grid-cols-[1.2fr_0.8fr]">
-          <div className="min-w-0 border-b border-white/10 xl:border-b-0 xl:border-r">
+        <div>
+          <div className="min-w-0 border-b border-white/10">
             <Editor
               height="320px"
-              language={cell.engine === "spark_sql" ? "sql" : "python"}
+              language={meta.language}
               theme="vs-dark"
               value={cell.content}
               options={{
@@ -234,7 +286,7 @@ export function NotebookCellView({
             </div>
           </div>
           <div className="min-w-0 p-4">
-            <div className="mb-4 flex gap-2">
+            <div className="mb-3 flex flex-wrap gap-2">
               {resultTabs.map((tab) => (
                 <button
                   key={tab}
@@ -255,4 +307,3 @@ export function NotebookCellView({
     </Card>
   );
 }
-

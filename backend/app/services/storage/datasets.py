@@ -47,14 +47,55 @@ class DatasetFileService:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Upload token not found")
         return matches[0]
 
-    def read_preview(self, file_path: str | Path, limit: int = 25, delimiter: str = ",") -> tuple[list[dict], list[dict], int]:
+    def load_dataframe(
+        self,
+        file_path: str | Path,
+        limit: int | None = None,
+        delimiter: str = ",",
+        has_header: bool = True,
+    ) -> pd.DataFrame:
         path = Path(file_path)
         suffix = path.suffix.lower().lstrip(".")
 
-        if suffix == "csv":
+        if suffix in {"csv", "tsv", "txt"}:
+            dataframe = pd.read_csv(path, delimiter=delimiter, nrows=limit, header=0 if has_header else None)
+            if not has_header:
+                dataframe.columns = [f"column_{index}" for index in range(1, len(dataframe.columns) + 1)]
+            return dataframe
+
+        if suffix == "json":
+            with path.open("r", encoding="utf-8") as handle:
+                loaded = json.load(handle)
+            rows = loaded if isinstance(loaded, list) else [loaded]
+            if limit is not None:
+                rows = rows[:limit]
+            return pd.DataFrame(rows)
+
+        if suffix == "parquet":
+            dataframe = pd.read_parquet(path)
+            return dataframe.head(limit) if limit is not None else dataframe
+
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Execution is not supported for this file")
+
+    def read_preview(
+        self,
+        file_path: str | Path,
+        limit: int = 25,
+        delimiter: str = ",",
+        has_header: bool = True,
+    ) -> tuple[list[dict], list[dict], int]:
+        path = Path(file_path)
+        suffix = path.suffix.lower().lstrip(".")
+
+        if suffix in {"csv", "tsv", "txt"}:
             with path.open("r", encoding="utf-8", newline="") as handle:
-                reader = csv.DictReader(handle, delimiter=delimiter)
-                rows = [row for _, row in zip(range(limit), reader)]
+                if has_header:
+                    reader = csv.DictReader(handle, delimiter=delimiter)
+                    rows = [row for _, row in zip(range(limit), reader)]
+                else:
+                    raw_rows = [row for _, row in zip(range(limit), csv.reader(handle, delimiter=delimiter))]
+                    columns = [f"column_{index}" for index in range(1, len(raw_rows[0]) + 1)] if raw_rows else []
+                    rows = [dict(zip(columns, row)) for row in raw_rows]
             schema = [{"name": key, "type": "string"} for key in rows[0].keys()] if rows else []
             return rows, schema, len(rows)
 
@@ -74,7 +115,11 @@ class DatasetFileService:
 
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Preview is not supported for this file")
 
-    def compute_metadata(self, file_path: str | Path, delimiter: str = ",") -> tuple[list[dict], int]:
-        rows, schema, row_count = self.read_preview(file_path=file_path, limit=self.settings.execution.max_rows, delimiter=delimiter)
+    def compute_metadata(self, file_path: str | Path, delimiter: str = ",", has_header: bool = True) -> tuple[list[dict], int]:
+        rows, schema, row_count = self.read_preview(
+            file_path=file_path,
+            limit=self.settings.execution.max_rows,
+            delimiter=delimiter,
+            has_header=has_header,
+        )
         return schema, row_count if row_count else len(rows)
-

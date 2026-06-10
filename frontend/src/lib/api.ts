@@ -70,6 +70,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
+  updateDatasource: (datasourceId: string, payload: DatasourceDraft) =>
+    request<Datasource>(`/api/datasources/${datasourceId}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }),
   testDatasource: (payload: DatasourceDraft) =>
     request<{ success: boolean; message: string }>("/api/datasources/test", {
       method: "POST",

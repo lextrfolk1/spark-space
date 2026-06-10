@@ -13,6 +13,8 @@ export function DatasetsPage() {
   const [datasetName, setDatasetName] = useState("");
   const [description, setDescription] = useState("");
   const [tags, setTags] = useState("finance, curated");
+  const [delimiter, setDelimiter] = useState(",");
+  const [hasHeader, setHasHeader] = useState(true);
 
   const deferredSearch = useDeferredValue(search);
   const filtered = useMemo(
@@ -40,8 +42,8 @@ export function DatasetsPage() {
         dataset_name: datasetName,
         description,
         tags: tags.split(",").map((item) => item.trim()).filter(Boolean),
-        delimiter: ",",
-        has_header: true,
+        delimiter,
+        has_header: hasHeader,
         infer_schema: true,
       }),
     onSuccess: () => {
@@ -49,6 +51,8 @@ export function DatasetsPage() {
       setUploadToken(null);
       setDatasetName("");
       setDescription("");
+      setDelimiter(",");
+      setHasHeader(true);
       queryClient.invalidateQueries({ queryKey: ["datasets"] });
     },
   });
@@ -75,6 +79,20 @@ export function DatasetsPage() {
           <Field label="Tags">
             <Input value={tags} onChange={(event) => setTags(event.target.value)} />
           </Field>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="Delimiter">
+              <Input value={delimiter} maxLength={1} onChange={(event) => setDelimiter(event.target.value || ",")} />
+            </Field>
+            <label className="flex items-center gap-3 rounded-2xl border border-border bg-slate-950/20 px-3 py-2 text-sm text-muted">
+              <Input
+                type="checkbox"
+                checked={hasHeader}
+                onChange={(event) => setHasHeader(event.target.checked)}
+                className="h-4 w-4 rounded border-border bg-slate-950/30 px-0 py-0"
+              />
+              <span>First row is header</span>
+            </label>
+          </div>
           <Button className="w-full" onClick={() => registerMutation.mutate()} disabled={!uploadToken || registerMutation.isPending}>
             Register Dataset
           </Button>
@@ -122,4 +140,3 @@ export function DatasetsPage() {
     </div>
   );
 }
-

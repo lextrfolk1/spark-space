@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import RuntimeSettings
 from app.core.security import CredentialCipher
 from app.models.entities import DatasourceRecord
-from app.schemas.datasources import DatasourceCreate, DatasourceResponse
+from app.schemas.datasources import DatasourceCreate, DatasourceResponse, DatasourceUpdate
 
 
 class DatasourceService:
@@ -89,10 +89,45 @@ class DatasourceService:
             has_password=bool(record.encrypted_password),
         )
 
+    async def update(self, session: AsyncSession, datasource_id: str, payload: DatasourceUpdate) -> DatasourceResponse | None:
+        record = await session.get(DatasourceRecord, datasource_id)
+        if record is None:
+            return None
+
+        record.name = payload.name
+        record.type = payload.type
+        record.host = payload.host
+        record.port = payload.port
+        record.database = payload.database
+        record.schema_name = payload.schema_name
+        record.username = payload.username
+        record.jdbc_url = payload.jdbc_url
+        record.metadata_json = payload.metadata
+        if payload.password:
+            record.encrypted_password = self.cipher.encrypt(payload.password)
+
+        await session.commit()
+        await session.refresh(record)
+        return DatasourceResponse(
+            id=record.id,
+            name=record.name,
+            type=record.type,
+            host=record.host,
+            port=record.port,
+            database=record.database,
+            schema_name=record.schema_name,
+            username=record.username,
+            jdbc_url=record.jdbc_url,
+            metadata=record.metadata_json or {},
+            runtime_managed=True,
+            created_at=record.created_at,
+            updated_at=record.updated_at,
+            has_password=bool(record.encrypted_password),
+        )
+
     async def delete(self, session: AsyncSession, datasource_id: str) -> None:
         record = await session.get(DatasourceRecord, datasource_id)
         if record is None:
             return
         await session.delete(record)
         await session.commit()
-

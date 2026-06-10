@@ -1,16 +1,24 @@
 from __future__ import annotations
 
+import ast
+import json
+import re
+import sqlite3
 import time
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+import pandas as pd
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import RuntimeSettings
-from app.models.entities import DatasetRecord, ExecutionRecord
+from app.core.config import ConfiguredDatasource, RuntimeSettings
+from app.models.entities import DatasetRecord, DatasourceRecord, ExecutionRecord
 from app.schemas.executions import ExecutionRequest, ExecutionResponse
 from app.services.logbook import log_book
+
+_READ_ONLY_SQL = re.compile(r"^\s*(select|with)\b", re.IGNORECASE)
+_SINGLE_EQUALS = re.compile(r"(?<![<>=!])=(?!=)")
 
 
 @dataclass
@@ -27,6 +35,7 @@ class ExecutionPlan:
     command: str
     datasets: list[DatasetRecord]
     datasource_id: str | None
+    datasource: DatasourceRecord | ConfiguredDatasource | None
     limit: int
     execution_mode: str
     context: dict[str, Any]
@@ -65,75 +74,267 @@ class PassthroughParser:
 class SparkSqlExecutor:
     async def execute(self, plan: ExecutionPlan) -> ExecutionPayload:
         if not plan.command:
-            return ExecutionPayload(
-                status="failed",
-                schema=[],
-                rows=[],
-                logs=["No SQL command provided."],
-                warnings=[],
-                error="Command cannot be empty",
-                statistics={},
-                dataframe_metadata={},
+            return _failed_payload("No SQL command provided.", "Command cannot be empty", engine="spark_sql")
+
+        if not plan.datasets:
+            message = "Select at least one registered dataset before running Spark SQL."
+            if plan.datasource is not None:
+                message = "Live datasource execution is not implemented yet. Select a registered dataset to run locally."
+            return _failed_payload(message, message, engine="spark_sql")
+
+        if not _READ_ONLY_SQL.match(plan.command):
+            return _failed_payload(
+                "Only read-only SELECT statements are supported in the local Spark SQL runner.",
+                "Unsupported SQL statement. Use SELECT or WITH queries only.",
+                engine="spark_sql",
             )
 
-        dataset = self._pick_dataset(plan)
-        if dataset is None:
-            return ExecutionPayload(
-                status="completed",
-                schema=[],
-                rows=[],
-                logs=["SQL executed with no dataset context."],
-                warnings=["No dataset was selected; returning an empty result set."],
-                error=None,
-                statistics={"engine": "spark_sql", "mode": "mock"},
-                dataframe_metadata={},
+        logs = ["Execution routed through SparkSqlExecutor."]
+        warnings: list[str] = []
+        if plan.datasource is not None:
+            warnings.append(
+                f"Validated datasource `{plan.datasource.name}` but executed against selected registered datasets in local mode."
+            )
+        try:
+            result_frame = _execute_local_sql(plan, plan.command, plan.limit)
+        except Exception as exc:  # pragma: no cover - exercised through tests, sqlite/pandas error types vary
+            return _failed_payload(
+                "Spark SQL execution failed during local validation.",
+                str(exc),
+                engine="spark_sql",
+                logs=logs,
+                warnings=warnings,
             )
 
-        rows = plan.context.get("dataset_previews", {}).get(dataset.id, [])[: plan.limit]
-        schema = plan.context.get("dataset_schemas", {}).get(dataset.id, [])
         return ExecutionPayload(
             status="completed",
-            schema=schema,
-            rows=rows,
-            logs=[
-                f"Parsed Spark SQL command for dataset `{dataset.name}`.",
-                "Execution routed through SparkSqlExecutor.",
+            schema=_schema_from_frame(result_frame),
+            rows=_rows_from_frame(result_frame),
+            logs=logs
+            + [
+                f"Registered {len(plan.datasets)} dataset(s) in the local execution context.",
+                "SQL query completed against in-memory tables.",
             ],
-            warnings=["Running in mock execution mode until live Spark execution is enabled."],
+            warnings=warnings,
             error=None,
-            statistics={"engine": "spark_sql", "dataset": dataset.name, "returnedRows": len(rows)},
-            dataframe_metadata={"normalized": True},
+            statistics={
+                "engine": "spark_sql",
+                "datasets": [dataset.name for dataset in plan.datasets],
+                "returnedRows": len(result_frame.index),
+            },
+            dataframe_metadata={"normalized": True, "localExecution": True},
         )
-
-    @staticmethod
-    def _pick_dataset(plan: ExecutionPlan) -> DatasetRecord | None:
-        if not plan.datasets:
-            return None
-        lowered = plan.command.lower()
-        for dataset in plan.datasets:
-            if dataset.name.lower() in lowered:
-                return dataset
-        return plan.datasets[0]
-
 
 class SparkDataFrameExecutor:
     async def execute(self, plan: ExecutionPlan) -> ExecutionPayload:
-        dataset = plan.datasets[0] if plan.datasets else None
-        schema = plan.context.get("dataset_schemas", {}).get(dataset.id, []) if dataset else []
-        rows = plan.context.get("dataset_previews", {}).get(dataset.id, [])[: plan.limit] if dataset else []
+        if not plan.command:
+            return _failed_payload("No DataFrame command provided.", "Command cannot be empty", engine="spark_dataframe")
+
+        base_name, operations = self._parse_dataframe_command(plan.command)
+        dataset = None
+        result_frame: pd.DataFrame
+        if operations and operations[0][0] == "sql":
+            try:
+                result_frame, dataset, operations = self._run_sql_backed_dataframe(plan, operations)
+            except Exception as exc:
+                return _failed_payload(
+                    f"Spark DataFrame SQL execution failed for alias `{base_name}`.",
+                    str(exc),
+                    engine="spark_dataframe",
+                )
+        else:
+            dataset = self._resolve_dataset(plan)
+            if dataset is None:
+                message = "Select a registered dataset before running Spark DataFrame commands."
+                if plan.datasource is not None:
+                    message = "Live datasource execution is not implemented yet. Bind a registered dataset for local DataFrame execution."
+                return _failed_payload(message, message, engine="spark_dataframe")
+
+            frame = plan.context.get("dataset_frames", {}).get(dataset.id)
+            if frame is None:
+                return _failed_payload(
+                    f"Dataset `{dataset.name}` is not available in the execution context.",
+                    f"Dataset `{dataset.name}` could not be loaded for execution.",
+                    engine="spark_dataframe",
+                )
+
+            try:
+                result_frame = self._apply_dataframe_operations(frame.copy(), operations)
+            except Exception as exc:
+                return _failed_payload(
+                    f"Spark DataFrame execution failed for dataset alias `{base_name}`.",
+                    str(exc),
+                    engine="spark_dataframe",
+                )
+
+        limited_frame = result_frame.head(plan.limit)
+        warnings: list[str] = []
+        if plan.datasource is not None:
+            target_name = dataset.name if dataset is not None else "selected datasets"
+            warnings.append(
+                f"Validated datasource `{plan.datasource.name}` but executed against {target_name} in local mode."
+            )
+
+        operation_labels = [self._format_operation(method_name, args) for method_name, args in operations]
+        bound_target = dataset.name if dataset is not None else ", ".join(item.name for item in plan.datasets)
+
         return ExecutionPayload(
             status="completed",
-            schema=schema,
-            rows=rows,
+            schema=_schema_from_frame(limited_frame),
+            rows=_rows_from_frame(limited_frame),
             logs=[
                 "Execution routed through SparkDataFrameExecutor.",
-                "DataFrame commands are normalized into the shared response contract.",
+                f"Bound DataFrame context to `{bound_target}`.",
+                f"Applied operations: {', '.join(operation_labels) if operation_labels else 'preview'}",
             ],
-            warnings=["DataFrame execution is currently simulated for local-first development."],
+            warnings=warnings,
             error=None,
-            statistics={"engine": "spark_dataframe", "datasetBound": bool(dataset)},
-            dataframe_metadata={"api": "pyspark", "previewOnly": True, "command": plan.command},
+            statistics={
+                "engine": "spark_dataframe",
+                "dataset": dataset.name if dataset is not None else None,
+                "datasets": [item.name for item in plan.datasets],
+                "returnedRows": len(limited_frame.index),
+                "resultRowsBeforeLimit": len(result_frame.index),
+            },
+            dataframe_metadata={
+                "api": "pyspark",
+                "localExecution": True,
+                "datasetAlias": base_name,
+                "operations": operation_labels,
+            },
         )
+
+    @staticmethod
+    def _resolve_dataset(plan: ExecutionPlan) -> DatasetRecord | None:
+        if not plan.datasets:
+            return None
+        if len(plan.datasets) == 1:
+            return plan.datasets[0]
+        return None
+
+    def _parse_dataframe_command(self, command: str) -> tuple[str, list[tuple[str, list[Any]]]]:
+        expression = self._extract_expression(command)
+        return self._flatten_operations(expression)
+
+    def _run_sql_backed_dataframe(
+        self,
+        plan: ExecutionPlan,
+        operations: list[tuple[str, list[Any]]],
+    ) -> tuple[pd.DataFrame, DatasetRecord | None, list[tuple[str, list[Any]]]]:
+        if not operations:
+            raise ValueError("`sql` requires a query argument.")
+
+        method_name, args = operations[0]
+        if method_name != "sql":
+            raise ValueError("The SQL-backed DataFrame path must start with `.sql(...)`.")
+        if len(args) != 1:
+            raise ValueError("`sql` expects exactly one SQL string argument.")
+
+        query = self._expect_string(args[0], "sql")
+        if not plan.datasets:
+            message = "Select a registered dataset before running Spark DataFrame commands."
+            if plan.datasource is not None:
+                message = "Live datasource execution is not implemented yet. Bind a registered dataset for local DataFrame execution."
+            raise ValueError(message)
+
+        result = _execute_local_sql(plan, query, plan.limit)
+        dataset = plan.datasets[0] if len(plan.datasets) == 1 else None
+        return self._apply_dataframe_operations(result, operations[1:]), dataset, operations
+
+    def _apply_dataframe_operations(
+        self,
+        frame: pd.DataFrame,
+        operations: list[tuple[str, list[Any]]],
+    ) -> pd.DataFrame:
+        result = frame
+        for method_name, args in operations:
+            if method_name == "sql":
+                raise ValueError("`sql` is only supported as the first DataFrame operation.")
+
+            if method_name == "select":
+                columns = [self._expect_string(value, "select") for value in args]
+                self._ensure_columns(result, columns)
+                result = result.loc[:, columns]
+                continue
+
+            if method_name in {"filter", "where"}:
+                if len(args) != 1:
+                    raise ValueError(f"`{method_name}` expects exactly one condition string.")
+                condition = self._expect_string(args[0], method_name)
+                normalized = _SINGLE_EQUALS.sub("==", condition)
+                result = result.query(normalized, engine="python")
+                continue
+
+            if method_name in {"limit", "head", "show"}:
+                if len(args) != 1:
+                    raise ValueError(f"`{method_name}` expects exactly one numeric argument.")
+                count = self._expect_int(args[0], method_name)
+                result = result.head(count)
+                continue
+
+            raise ValueError(
+                f"Unsupported DataFrame operation `{method_name}`. Supported operations: sql, select, filter, where, limit, head, show."
+            )
+
+        return result
+
+    @staticmethod
+    def _extract_expression(command: str) -> ast.expr:
+        module = ast.parse(command, mode="exec")
+        if len(module.body) != 1:
+            raise ValueError("Use a single DataFrame expression per cell in local execution mode.")
+        statement = module.body[0]
+        if isinstance(statement, ast.Expr):
+            value = statement.value
+        elif isinstance(statement, ast.Assign):
+            value = statement.value
+        else:
+            raise ValueError("Only assignment or expression-style DataFrame commands are supported locally.")
+        if not isinstance(value, ast.expr):
+            raise ValueError("Unable to parse the DataFrame command.")
+        return value
+
+    def _flatten_operations(self, expression: ast.expr) -> tuple[str, list[tuple[str, list[Any]]]]:
+        if isinstance(expression, ast.Name):
+            return expression.id, []
+
+        if isinstance(expression, ast.Call) and isinstance(expression.func, ast.Attribute):
+            base_name, operations = self._flatten_operations(expression.func.value)
+            if expression.keywords:
+                raise ValueError("Keyword arguments are not supported in local DataFrame execution.")
+            parsed_args = [self._literal_value(argument) for argument in expression.args]
+            return base_name, operations + [(expression.func.attr, parsed_args)]
+
+        raise ValueError("Unsupported DataFrame command format for local execution.")
+
+    @staticmethod
+    def _literal_value(node: ast.expr) -> Any:
+        try:
+            return ast.literal_eval(node)
+        except Exception as exc:  # pragma: no cover - ast error types vary
+            raise ValueError("Only literal arguments are supported in local DataFrame execution.") from exc
+
+    @staticmethod
+    def _ensure_columns(frame: pd.DataFrame, columns: list[str]) -> None:
+        missing = [column for column in columns if column not in frame.columns]
+        if missing:
+            raise ValueError(f"Unknown column(s): {', '.join(missing)}")
+
+    @staticmethod
+    def _expect_string(value: Any, operation: str) -> str:
+        if not isinstance(value, str):
+            raise ValueError(f"`{operation}` expects string arguments.")
+        return value
+
+    @staticmethod
+    def _expect_int(value: Any, operation: str) -> int:
+        if not isinstance(value, int):
+            raise ValueError(f"`{operation}` expects an integer argument.")
+        return value
+
+    @staticmethod
+    def _format_operation(method_name: str, args: list[Any]) -> str:
+        return f"{method_name}({', '.join(repr(arg) for arg in args)})"
 
 
 class RuleEngineExecutor:
@@ -186,18 +387,38 @@ class ExecutionService:
         started = time.perf_counter()
         parsed = self.parser.parse(request)
         datasets = await self._load_datasets(session, request.dataset_ids)
-        preview_context = await self._build_dataset_context(datasets)
-        plan = ExecutionPlan(
-            engine=parsed.engine,
-            command=parsed.command,
-            datasets=datasets,
-            datasource_id=request.datasource_id,
-            limit=request.limit or self.settings.execution.default_limit,
-            execution_mode=parsed.execution_mode,
-            context={**parsed.context, **preview_context},
+        missing_dataset_ids = [dataset_id for dataset_id in request.dataset_ids if dataset_id not in {row.id for row in datasets}]
+        datasource = await self._load_datasource(session, request.datasource_id)
+        execution_limit = min(
+            request.limit or self.settings.execution.default_limit,
+            self.settings.execution.max_rows,
         )
+        preview_context = await self._build_dataset_context(datasets)
         log_book.add("execution", "info", f"Executing {request.engine} command in {request.execution_mode} mode")
-        payload = await self.registry.get_executor(request.engine).execute(plan)
+        if missing_dataset_ids:
+            payload = _failed_payload(
+                f"Requested dataset(s) were not found: {', '.join(missing_dataset_ids)}",
+                f"Unknown dataset id(s): {', '.join(missing_dataset_ids)}",
+                engine=request.engine,
+            )
+        elif request.datasource_id is not None and datasource is None:
+            payload = _failed_payload(
+                f"Requested datasource `{request.datasource_id}` was not found.",
+                f"Unknown datasource id: {request.datasource_id}",
+                engine=request.engine,
+            )
+        else:
+            plan = ExecutionPlan(
+                engine=parsed.engine,
+                command=parsed.command,
+                datasets=datasets,
+                datasource_id=request.datasource_id,
+                datasource=datasource,
+                limit=execution_limit,
+                execution_mode=parsed.execution_mode,
+                context={**parsed.context, **preview_context},
+            )
+            payload = await self.registry.get_executor(request.engine).execute(plan)
         duration_ms = int((time.perf_counter() - started) * 1000)
 
         record = ExecutionRecord(
@@ -242,18 +463,89 @@ class ExecutionService:
         if not dataset_ids:
             return []
         rows = (await session.execute(select(DatasetRecord).where(DatasetRecord.id.in_(dataset_ids)))).scalars().all()
-        return list(rows)
+        datasets_by_id = {row.id: row for row in rows}
+        return [datasets_by_id[dataset_id] for dataset_id in dataset_ids if dataset_id in datasets_by_id]
+
+    async def _load_datasource(
+        self,
+        session: AsyncSession,
+        datasource_id: str | None,
+    ) -> DatasourceRecord | ConfiguredDatasource | None:
+        if datasource_id is None:
+            return None
+
+        configured = next(
+            (item for item in self.settings.datasource.configured_connections if item.id == datasource_id),
+            None,
+        )
+        if configured is not None:
+            return configured
+
+        return await session.get(DatasourceRecord, datasource_id)
 
     async def _build_dataset_context(self, datasets: list[DatasetRecord]) -> dict[str, Any]:
-        from app.services.storage.datasets import DatasetFileService
         from app.core.config import get_settings
+        from app.services.storage.datasets import DatasetFileService
 
         file_service = DatasetFileService(get_settings())
-        previews: dict[str, list[dict]] = {}
-        schemas: dict[str, list[dict]] = {}
+        previews: dict[str, list[dict[str, Any]]] = {}
+        schemas: dict[str, list[dict[str, Any]]] = {}
+        frames: dict[str, pd.DataFrame] = {}
         for dataset in datasets:
-            rows, schema, _ = file_service.read_preview(dataset.location, limit=self.settings.execution.default_limit)
-            previews[dataset.id] = rows
-            schemas[dataset.id] = schema
-        return {"dataset_previews": previews, "dataset_schemas": schemas}
+            metadata = dataset.metadata_json or {}
+            frame = file_service.load_dataframe(
+                dataset.location,
+                limit=self.settings.execution.max_rows,
+                delimiter=metadata.get("delimiter", ","),
+                has_header=metadata.get("has_header", True),
+            )
+            frames[dataset.id] = frame
+            preview_frame = frame.head(self.settings.execution.default_limit)
+            previews[dataset.id] = _rows_from_frame(preview_frame)
+            schemas[dataset.id] = _schema_from_frame(preview_frame)
+        return {"dataset_previews": previews, "dataset_schemas": schemas, "dataset_frames": frames}
 
+
+def _schema_from_frame(frame: pd.DataFrame) -> list[dict[str, Any]]:
+    return [{"name": name, "type": str(dtype)} for name, dtype in frame.dtypes.items()]
+
+
+def _rows_from_frame(frame: pd.DataFrame) -> list[dict[str, Any]]:
+    return json.loads(frame.to_json(orient="records", date_format="iso"))
+
+
+def _execute_local_sql(plan: ExecutionPlan, query: str, limit: int) -> pd.DataFrame:
+    connection = sqlite3.connect(":memory:")
+    try:
+        frames: dict[str, pd.DataFrame] = plan.context.get("dataset_frames", {})
+        for dataset in plan.datasets:
+            frame = frames.get(dataset.id)
+            if frame is None:
+                raise ValueError(f"Dataset `{dataset.name}` is not available in the execution context.")
+            frame.to_sql(dataset.name, connection, index=False, if_exists="replace")
+
+        stripped_query = query.strip().rstrip(";")
+        limited_query = f"SELECT * FROM ({stripped_query}) AS workspace_result LIMIT {limit}"
+        return pd.read_sql_query(limited_query, connection)
+    finally:
+        connection.close()
+
+
+def _failed_payload(
+    log_message: str,
+    error_message: str,
+    *,
+    engine: str,
+    logs: list[str] | None = None,
+    warnings: list[str] | None = None,
+) -> ExecutionPayload:
+    return ExecutionPayload(
+        status="failed",
+        schema=[],
+        rows=[],
+        logs=(logs or []) + [log_message],
+        warnings=warnings or [],
+        error=error_message,
+        statistics={"engine": engine},
+        dataframe_metadata={},
+    )

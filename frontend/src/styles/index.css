@@ -4,12 +4,12 @@
 
 :root {
   color-scheme: dark;
-  --color-canvas: #07111f;
-  --color-panel: rgba(10, 24, 40, 0.9);
-  --color-accent: #5eead4;
-  --color-ink: #e2e8f0;
-  --color-muted: #94a3b8;
-  --color-border: rgba(148, 163, 184, 0.16);
+  --color-canvas: #12151b;
+  --color-panel: rgba(24, 28, 36, 0.94);
+  --color-accent: #f2c96d;
+  --color-ink: #f2f4f7;
+  --color-muted: #a4acb9;
+  --color-border: rgba(164, 172, 185, 0.16);
 }
 
 * {
@@ -26,8 +26,9 @@ body {
   margin: 0;
   font-family: "IBM Plex Sans", sans-serif;
   background:
-    radial-gradient(circle at top, rgba(14, 165, 233, 0.18), transparent 32%),
-    linear-gradient(180deg, #06101e 0%, #091827 42%, #07111f 100%);
+    radial-gradient(circle at top left, rgba(242, 201, 109, 0.12), transparent 26%),
+    radial-gradient(circle at bottom right, rgba(96, 165, 250, 0.08), transparent 24%),
+    linear-gradient(180deg, #11141a 0%, #151922 42%, #101319 100%);
   color: var(--color-ink);
 }
 
@@ -42,4 +43,3 @@ pre,
 code {
   font-family: "IBM Plex Mono", monospace;
 }
-

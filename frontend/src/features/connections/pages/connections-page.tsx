@@ -1,9 +1,11 @@
+import { PencilLine } from "lucide-react";
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../lib/api";
+import { Datasource, DatasourceDraft } from "../../../types/domain";
 import { Button, Card, Field, Input, Select } from "../../../components/shared/ui";
 
-const initialDraft = {
+const initialDraft: DatasourceDraft = {
   name: "",
   type: "POSTGRESQL",
   host: "",
@@ -16,16 +18,43 @@ const initialDraft = {
   metadata: {},
 };
 
+function datasourceToDraft(datasource: Datasource): DatasourceDraft {
+  return {
+    name: datasource.name,
+    type: datasource.type,
+    host: datasource.host,
+    port: datasource.port,
+    database: datasource.database ?? "",
+    schema_name: datasource.schema_name ?? "",
+    username: datasource.username ?? "",
+    password: "",
+    jdbc_url: datasource.jdbc_url ?? "",
+    metadata: datasource.metadata ?? {},
+  };
+}
+
 export function ConnectionsPage() {
   const queryClient = useQueryClient();
   const { data: datasources = [] } = useQuery({ queryKey: ["datasources"], queryFn: api.listDatasources });
   const [draft, setDraft] = useState(initialDraft);
   const [testMessage, setTestMessage] = useState("");
+  const [editingId, setEditingId] = useState<string | null>(null);
 
   const createMutation = useMutation({
     mutationFn: () => api.createDatasource(draft),
     onSuccess: () => {
       setDraft(initialDraft);
+      setEditingId(null);
+      queryClient.invalidateQueries({ queryKey: ["datasources"] });
+    },
+  });
+
+  const updateMutation = useMutation({
+    mutationFn: () => api.updateDatasource(editingId!, draft),
+    onSuccess: () => {
+      setDraft(initialDraft);
+      setEditingId(null);
+      setTestMessage("Connection updated.");
       queryClient.invalidateQueries({ queryKey: ["datasources"] });
     },
   });
@@ -40,11 +69,17 @@ export function ConnectionsPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["datasources"] }),
   });
 
+  const isEditing = editingId !== null;
+
   return (
     <div className="grid gap-4 xl:grid-cols-[420px_minmax(0,1fr)]">
       <Card className="p-5">
-        <p className="font-display text-2xl">Runtime Connections</p>
-        <p className="mt-2 text-sm text-muted">Create secure, runtime-managed connections without exposing stored passwords back to the UI.</p>
+        <p className="font-display text-2xl">{isEditing ? "Edit Connection" : "Runtime Connections"}</p>
+        <p className="mt-2 text-sm text-muted">
+          {isEditing
+            ? "Update the runtime connection details. Leave password blank to keep the existing secret."
+            : "Create secure, runtime-managed connections without exposing stored passwords back to the UI."}
+        </p>
         <div className="mt-5 grid gap-4">
           <Field label="Name">
             <Input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} />
@@ -93,10 +128,23 @@ export function ConnectionsPage() {
             <Button variant="ghost" className="flex-1" onClick={() => testMutation.mutate()}>
               Test Connection
             </Button>
-            <Button className="flex-1" onClick={() => createMutation.mutate()}>
-              Save Connection
+            <Button className="flex-1" onClick={() => (isEditing ? updateMutation.mutate() : createMutation.mutate())}>
+              {isEditing ? "Update Connection" : "Save Connection"}
             </Button>
           </div>
+          {isEditing && (
+            <Button
+              variant="ghost"
+              className="w-full"
+              onClick={() => {
+                setEditingId(null);
+                setDraft(initialDraft);
+                setTestMessage("");
+              }}
+            >
+              Cancel Edit
+            </Button>
+          )}
           <p className="text-xs text-muted">{testMessage}</p>
         </div>
       </Card>
@@ -121,9 +169,23 @@ export function ConnectionsPage() {
                 {datasource.database || "default"} / {datasource.schema_name || "public"}
               </p>
               {datasource.runtime_managed && (
-                <Button variant="danger" className="mt-4" onClick={() => deleteMutation.mutate(datasource.id)}>
-                  Delete
-                </Button>
+                <div className="mt-4 flex gap-2">
+                  <Button
+                    variant="ghost"
+                    className="gap-2"
+                    onClick={() => {
+                      setEditingId(datasource.id);
+                      setDraft(datasourceToDraft(datasource));
+                      setTestMessage("");
+                    }}
+                  >
+                    <PencilLine size={16} />
+                    Edit
+                  </Button>
+                  <Button variant="danger" onClick={() => deleteMutation.mutate(datasource.id)}>
+                    Delete
+                  </Button>
+                </div>
               )}
             </div>
           ))}
@@ -132,4 +194,3 @@ export function ConnectionsPage() {
     </div>
   );
 }
-

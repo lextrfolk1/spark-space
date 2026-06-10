@@ -21,7 +21,11 @@ class DatasetCatalogService:
 
     async def register(self, session: AsyncSession, payload: DatasetRegistrationRequest) -> DatasetResponse:
         source_path = self.file_service.resolve_upload(payload.upload_token)
-        schema, row_count = self.file_service.compute_metadata(source_path, delimiter=payload.delimiter)
+        schema, row_count = self.file_service.compute_metadata(
+            source_path,
+            delimiter=payload.delimiter,
+            has_header=payload.has_header,
+        )
         record = DatasetRecord(
             name=payload.dataset_name,
             description=payload.description,
@@ -29,7 +33,11 @@ class DatasetCatalogService:
             source_type=source_path.suffix.lstrip(".").upper(),
             source_id=payload.upload_token,
             schema_json=schema,
-            metadata_json={"delimiter": payload.delimiter, "has_header": payload.has_header},
+            metadata_json={
+                "delimiter": payload.delimiter,
+                "has_header": payload.has_header,
+                "infer_schema": payload.infer_schema,
+            },
             location=str(source_path),
             created_by=payload.created_by,
             row_count=row_count,
@@ -47,7 +55,13 @@ class DatasetCatalogService:
         await session.commit()
 
     def preview(self, record: DatasetRecord, limit: int = 25) -> tuple[list[dict], list[dict], int]:
-        return self.file_service.read_preview(record.location, limit=limit, delimiter=record.metadata_json.get("delimiter", ","))
+        metadata = record.metadata_json or {}
+        return self.file_service.read_preview(
+            record.location,
+            limit=limit,
+            delimiter=metadata.get("delimiter", ","),
+            has_header=metadata.get("has_header", True),
+        )
 
     @staticmethod
     def _to_schema(record: DatasetRecord) -> DatasetResponse:
@@ -66,4 +80,3 @@ class DatasetCatalogService:
             updated_at=record.updated_at,
             row_count=record.row_count,
         )
-

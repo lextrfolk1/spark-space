@@ -22,6 +22,10 @@ class DatasourceCreate(DatasourceBase):
     password: str | None = None
 
 
+class DatasourceUpdate(DatasourceBase):
+    password: str | None = None
+
+
 class DatasourceTestRequest(DatasourceBase):
     password: str | None = None
 
@@ -37,4 +41,3 @@ class DatasourceResponse(DatasourceBase):
 class DatasourceTestResponse(BaseModel):
     success: bool
     message: str
-

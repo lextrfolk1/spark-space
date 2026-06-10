@@ -26,7 +26,7 @@ class ExecutionConfig(BaseModel):
 class UploadConfig(BaseModel):
     enabled: bool = True
     max_file_size_mb: int = 100
-    allowed_extensions: list[str] = Field(default_factory=lambda: ["csv", "json", "parquet"])
+    allowed_extensions: list[str] = Field(default_factory=lambda: ["csv", "tsv", "txt", "json", "parquet"])
 
 
 class ConfiguredDatasource(BaseModel):
@@ -187,4 +187,3 @@ def get_settings() -> RuntimeSettings:
     yaml_config = _load_yaml(config_file)
     merged = _deep_merge(yaml_config, _environment_overlay(env))
     return RuntimeSettings.model_validate(merged)
-
