@@ -65,6 +65,7 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL}
       CONFIG_FILE: ${CONFIG_FILE:-/app/config/application.yml}
+      PYTHONPATH: /app/backend
     ports:
       - "${APP_PORT:-8000}:8000"
     volumes:

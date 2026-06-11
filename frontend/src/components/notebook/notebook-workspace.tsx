@@ -1,6 +1,6 @@
-import { useMemo } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { Plus, Play, Trash2, Search, FileCode, Database, ChevronDown, Sparkles, Terminal, Bot } from "lucide-react";
+import { useMemo, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Plus, Play, Trash2, Search, FileCode, Database, ChevronDown, Sparkles, Terminal, Bot, Edit3 } from "lucide-react";
 import { clsx } from "clsx";
 import { api } from "../../lib/api";
 import { useNotebookStore } from "../../store/notebook-store";
@@ -25,7 +25,23 @@ export function NotebookWorkspace() {
     closeTab,
     searchQuery,
     setSearchQuery,
+    renameNotebook,
   } = useNotebookStore();
+
+  const queryClient = useQueryClient();
+  const [isRenamingTitle, setIsRenamingTitle] = useState(false);
+  const [renamingTitleName, setRenamingTitleName] = useState("");
+
+  const handleRenameTitle = async () => {
+    if (!activeNotebook) return;
+    if (!renamingTitleName.trim() || renamingTitleName.trim() === activeNotebook.name) {
+      setIsRenamingTitle(false);
+      return;
+    }
+    await renameNotebook(activeNotebook.id, renamingTitleName.trim());
+    queryClient.invalidateQueries({ queryKey: ["notebooks"] });
+    setIsRenamingTitle(false);
+  };
 
   // Filter cells by search
   const filteredCells = useMemo(() => {
@@ -86,6 +102,53 @@ export function NotebookWorkspace() {
           ))}
         </div>
       )}
+
+      {/* Notebook Header Title */}
+      <div className="flex items-center justify-between border-b border-white/[0.04] pb-2 px-1 pt-1">
+        <div className="flex items-center gap-2">
+          <FileCode className="text-amber-400/60" size={15} />
+          {isRenamingTitle ? (
+            <input
+              type="text"
+              value={renamingTitleName}
+              onChange={(e) => setRenamingTitleName(e.target.value)}
+              onKeyDown={async (e) => {
+                if (e.key === "Enter") {
+                  await handleRenameTitle();
+                } else if (e.key === "Escape") {
+                  setIsRenamingTitle(false);
+                }
+              }}
+              onBlur={handleRenameTitle}
+              autoFocus
+              className="bg-slate-900 border border-accent/20 rounded px-2 py-0.5 text-xs font-bold text-ink outline-none"
+            />
+          ) : (
+            <div className="flex items-center gap-1.5 group/title">
+              <h2
+                className="text-xs font-bold text-ink cursor-pointer hover:text-accent transition-colors"
+                onClick={() => {
+                  setIsRenamingTitle(true);
+                  setRenamingTitleName(activeNotebook.name);
+                }}
+                title="Click to rename"
+              >
+                {activeNotebook.name}
+              </h2>
+              <button
+                onClick={() => {
+                  setIsRenamingTitle(true);
+                  setRenamingTitleName(activeNotebook.name);
+                }}
+                className="opacity-0 group-hover/title:opacity-100 p-0.5 rounded hover:bg-white/[0.04] transition-all text-muted/40 hover:text-ink"
+                title="Rename notebook"
+              >
+                <Edit3 size={11} />
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
 
       {/* Toolbar */}
       <div className="flex items-center gap-2 px-1">

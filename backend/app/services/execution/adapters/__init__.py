@@ -233,6 +233,8 @@ class SparkAdapter(DataSourceAdapter):
         port = self._config.get("port", 15002)
         remote = f"sc://{host}:{port}"
 
+        p_logs = []
+        p_warnings = []
         try:
             spark = await asyncio.to_thread(self._get_spark_session, remote)
 
@@ -243,6 +245,11 @@ class SparkAdapter(DataSourceAdapter):
                 frame = frames.get(dataset.id)
                 if frame is not None:
                     await asyncio.to_thread(self._register_dataset, spark, dataset.name, frame)
+
+            # Register PostgreSQL tables if any
+            postgres_config = self._config.get("postgres_config")
+            if postgres_config:
+                p_logs, p_warnings = await register_postgres_tables_in_spark(spark, postgres_config)
 
             # Run the query
             def run_sql():
@@ -265,11 +272,12 @@ class SparkAdapter(DataSourceAdapter):
                 logs=[
                     "Connected to Spark Connect session.",
                     "SQL query executed on remote Spark cluster."
-                ],
+                ] + p_logs,
+                warnings=p_warnings,
             )
         except Exception as exc:
             logger.error(f"Spark Connect query failed: {exc}", exc_info=True)
-            return RawResult(status="failed", error=str(exc))
+            return RawResult(status="failed", error=str(exc), logs=p_logs, warnings=p_warnings)
 
     def _get_spark_session(self, remote: str) -> SparkSession:
         from app.services.execution.pipeline import _get_spark_connect_session
@@ -295,6 +303,197 @@ class SparkAdapter(DataSourceAdapter):
 
     def supports(self, datasource_type: str) -> bool:
         return datasource_type.upper() in {"SPARK", "SPARK_SQL"}
+
+
+async def register_postgres_tables_in_spark(spark: SparkSession, postgres_config: dict[str, Any], query: str | None = None) -> tuple[list[str], list[str]]:
+    import asyncio
+    import asyncpg
+    import pandas as pd
+    import re
+    import logging
+    import uuid
+    from decimal import Decimal
+    logger = logging.getLogger(__name__)
+
+    logs = []
+    warnings = []
+
+    logs.append("--- [START] register_postgres_tables_in_spark ---")
+
+    host = postgres_config.get("host")
+    port = postgres_config.get("port")
+    user = postgres_config.get("username")
+    password = postgres_config.get("password")
+    database = postgres_config.get("database")
+    schema_name = postgres_config.get("schema_name") or "public"
+
+    logs.append(f"Postgres Connection Config: host={host}, port={port}, user={user}, database={database}, schema={schema_name}")
+
+    if not host or not user or password is None or not database:
+        warnings.append("Error: Incomplete PostgreSQL credentials.")
+        logger.warning("PostgreSQL credentials incomplete for Spark registration.")
+        return logs, warnings
+
+    logs.append(f"Connecting to PostgreSQL to fetch tables for Spark view registration: {host}:{port}/{database}")
+    try:
+        connection = await asyncpg.connect(
+            host=host,
+            port=port,
+            user=user,
+            password=password,
+            database=database,
+            timeout=5,
+        )
+        logs.append("Connected to PostgreSQL successfully!")
+        try:
+            # Query all user tables in the schema
+            db_query = """
+                SELECT table_schema, table_name 
+                FROM information_schema.tables 
+                WHERE table_schema NOT IN ('pg_catalog', 'information_schema') 
+                  AND table_type = 'BASE TABLE'
+            """
+            rows = await connection.fetch(db_query)
+            logs.append(f"Discovered {len(rows)} tables in PostgreSQL database")
+            
+            query_lower = query.lower() if query else None
+            for r in rows:
+                t_schema = r["table_schema"]
+                t_name = r["table_name"]
+                clean_name = re.sub(r'[^a-zA-Z0-9_]', '_', t_name)
+
+                # Only register tables that are mentioned in the query
+                if query_lower is not None:
+                    mentioned = False
+                    for check_name in [t_name, clean_name, f"{t_schema}.{t_name}", f"{t_schema}.{clean_name}", f"{t_schema}_{t_name}"]:
+                        if check_name and check_name.lower() in query_lower:
+                            mentioned = True
+                            break
+                    if not mentioned:
+                        continue
+
+                logs.append(f"Registering table: {t_schema}.{t_name}")
+                
+                # Fetch up to 100 rows to represent the table structure and recent data
+                try:
+                    data_rows = await connection.fetch(f'SELECT * FROM "{t_schema}"."{t_name}" LIMIT 100')
+                    dicts = [dict(record) for record in data_rows]
+                    logs.append(f"Fetched {len(dicts)} rows for table {t_schema}.{t_name}")
+                except Exception as fetch_exc:
+                    warnings.append(f"Failed to fetch rows for table {t_schema}.{t_name}: {fetch_exc}")
+                    continue
+                
+                if dicts:
+                    df = pd.DataFrame(dicts)
+                    for col in df.columns:
+                        # Convert Decimal
+                        if any(isinstance(val, Decimal) for val in df[col].dropna()):
+                            df[col] = df[col].apply(lambda x: float(x) if isinstance(x, Decimal) else x)
+                        # Convert UUID
+                        if any(isinstance(val, uuid.UUID) for val in df[col].dropna()):
+                            df[col] = df[col].apply(lambda x: str(x) if isinstance(x, uuid.UUID) else x)
+
+                    def reg():
+                        try:
+                            spark_df = spark.createDataFrame(df)
+                            
+                            # Register in target namespace if schema is not default
+                            if t_schema and t_schema.lower() != "default":
+                                spark.sql(f"CREATE DATABASE IF NOT EXISTS {t_schema}")
+                                spark_df.write.mode("overwrite").saveAsTable(f"{t_schema}.{clean_name}")
+                                if clean_name != t_name:
+                                    spark_df.write.mode("overwrite").saveAsTable(f"{t_schema}.{t_name}")
+                            
+                            # Also register flat views
+                            spark_df.createOrReplaceTempView(clean_name)
+                            if clean_name != t_name:
+                                spark_df.createOrReplaceTempView(t_name)
+                                
+                            # Also register prefixed view schema_table
+                            spark_df.createOrReplaceTempView(f"{t_schema}_{clean_name}")
+                            if clean_name != t_name:
+                                spark_df.createOrReplaceTempView(f"{t_schema}_{t_name}")
+                                
+                            logger.info(f"Successfully registered PostgreSQL table '{t_schema}.{t_name}' in Spark Connect")
+                            logs.append(f"Successfully registered PostgreSQL table '{t_schema}.{t_name}' in Spark Connect")
+                        except Exception as e:
+                            logger.error(f"Failed to register Spark view for '{t_schema}.{t_name}': {e}")
+                            logs.append(f"Failed to register Spark view for '{t_schema}.{t_name}': {e}")
+                            warnings.append(f"Failed to register Spark view for '{t_schema}.{t_name}': {e}")
+
+                    await asyncio.to_thread(reg)
+                else:
+                    columns_query = """
+                        SELECT column_name, data_type 
+                        FROM information_schema.columns 
+                        WHERE table_schema = $1 AND table_name = $2
+                        ORDER BY ordinal_position
+                    """
+                    col_rows = await connection.fetch(columns_query, t_schema, t_name)
+                    
+                    # Build StructType for empty table
+                    from pyspark.sql.types import StructType, StructField, StringType, IntegerType, DoubleType, BooleanType, TimestampType, LongType
+                    
+                    fields = []
+                    for col_r in col_rows:
+                        col_name = col_r["column_name"]
+                        col_type = col_r["data_type"].lower()
+                        
+                        if "int2" in col_type or "int4" in col_type or "integer" in col_type:
+                            spark_type = IntegerType()
+                        elif "int8" in col_type or "bigint" in col_type:
+                            spark_type = LongType()
+                        elif "numeric" in col_type or "decimal" in col_type or "double" in col_type or "real" in col_type:
+                            spark_type = DoubleType()
+                        elif "bool" in col_type:
+                            spark_type = BooleanType()
+                        elif "timestamp" in col_type or "date" in col_type:
+                            spark_type = TimestampType()
+                        else:
+                            spark_type = StringType()
+                            
+                        fields.append(StructField(col_name, spark_type, True))
+                    
+                    schema = StructType(fields)
+                    
+                    def reg_empty():
+                        try:
+                            # Create empty DataFrame with schema
+                            spark_df = spark.createDataFrame([], schema=schema)
+                            
+                            # Register in target namespace if schema is not default
+                            if t_schema and t_schema.lower() != "default":
+                                spark.sql(f"CREATE DATABASE IF NOT EXISTS {t_schema}")
+                                spark_df.write.mode("overwrite").saveAsTable(f"{t_schema}.{clean_name}")
+                                if clean_name != t_name:
+                                    spark_df.write.mode("overwrite").saveAsTable(f"{t_schema}.{t_name}")
+                            
+                            # Also register flat views
+                            spark_df.createOrReplaceTempView(clean_name)
+                            if clean_name != t_name:
+                                spark_df.createOrReplaceTempView(t_name)
+                                
+                            # Also register prefixed view schema_table
+                            spark_df.createOrReplaceTempView(f"{t_schema}_{clean_name}")
+                            if clean_name != t_name:
+                                spark_df.createOrReplaceTempView(f"{t_schema}_{t_name}")
+                                
+                            logger.info(f"Successfully registered empty PostgreSQL table '{t_schema}.{t_name}' in Spark Connect")
+                            logs.append(f"Successfully registered empty PostgreSQL table '{t_schema}.{t_name}' in Spark Connect")
+                        except Exception as e:
+                            logger.error(f"Failed to register Spark view for empty '{t_schema}.{t_name}': {e}")
+                            logs.append(f"Failed to register Spark view for empty '{t_schema}.{t_name}': {e}")
+                            warnings.append(f"Failed to register Spark view for empty '{t_schema}.{t_name}': {e}")
+
+                    await asyncio.to_thread(reg_empty)
+        finally:
+            await connection.close()
+    except Exception as e:
+        logger.error(f"Failed to fetch PostgreSQL tables for Spark: {e}", exc_info=True)
+        logs.append(f"Failed to fetch PostgreSQL tables for Spark: {e}")
+        warnings.append(f"Failed to fetch PostgreSQL tables for Spark: {e}")
+
+    return logs, warnings
 
 
 # ---------------------------------------------------------------------------

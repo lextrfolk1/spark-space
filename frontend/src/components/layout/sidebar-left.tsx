@@ -15,6 +15,8 @@ import {
   History,
   Settings,
   Sparkles,
+  Edit3,
+  Trash2,
 } from "lucide-react";
 import { api } from "../../lib/api";
 import { useNotebookStore } from "../../store/notebook-store";
@@ -59,7 +61,26 @@ export function SidebarLeft() {
     queryFn: api.listDatasources,
     enabled: isWorkspace
   });
-  const { openTab, setActiveNotebook } = useNotebookStore();
+  const { openTab, setActiveNotebook, renameNotebook, deleteNotebook } = useNotebookStore();
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renamingName, setRenamingName] = useState("");
+
+  const handleRename = async (notebookId: string, name: string) => {
+    if (!name.trim()) {
+      setRenamingId(null);
+      return;
+    }
+    await renameNotebook(notebookId, name.trim());
+    queryClient.invalidateQueries({ queryKey: ["notebooks"] });
+    setRenamingId(null);
+  };
+
+  const deleteNotebookMutation = useMutation({
+    mutationFn: (id: string) => deleteNotebook(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["notebooks"] });
+    },
+  });
 
   const createNotebookMutation = useMutation({
     mutationFn: () => api.createNotebook({ name: `Notebook ${notebooks.length + 1}` }),
@@ -151,15 +172,63 @@ export function SidebarLeft() {
               onAdd={() => createNotebookMutation.mutate()}
             >
               {filtered(notebooks).map((nb) => (
-                <button
-                  key={nb.id}
-                  className="w-full flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs text-muted hover:bg-white/[0.04] hover:text-ink transition-colors text-left group"
-                  onClick={() => handleOpenNotebook(nb)}
-                >
-                  <FolderOpen size={13} className="text-amber-400/60 shrink-0" />
-                  <span className="truncate flex-1">{nb.name}</span>
-                  <span className="text-[9px] text-muted/30 shrink-0">{nb.cell_count}c</span>
-                </button>
+                <div key={nb.id} className="relative group/nb-item flex items-center w-full">
+                  {renamingId === nb.id ? (
+                    <input
+                      type="text"
+                      value={renamingName}
+                      onChange={(e) => setRenamingName(e.target.value)}
+                      onKeyDown={async (e) => {
+                        if (e.key === "Enter") {
+                          await handleRename(nb.id, renamingName);
+                        } else if (e.key === "Escape") {
+                          setRenamingId(null);
+                        }
+                      }}
+                      onBlur={async () => {
+                        await handleRename(nb.id, renamingName);
+                      }}
+                      autoFocus
+                      className="bg-slate-900 border border-accent/20 rounded px-1.5 py-0.5 text-xs text-ink w-full outline-none ml-5 mr-2"
+                    />
+                  ) : (
+                    <>
+                      <button
+                        className="w-full flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs text-muted hover:bg-white/[0.04] hover:text-ink transition-colors text-left group pr-14"
+                        onClick={() => handleOpenNotebook(nb)}
+                      >
+                        <FolderOpen size={13} className="text-amber-400/60 shrink-0" />
+                        <span className="truncate flex-1">{nb.name}</span>
+                        <span className="text-[9px] text-muted/30 shrink-0 group-hover:hidden">{nb.cell_count}c</span>
+                      </button>
+                      <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1 opacity-0 group-hover/nb-item:opacity-100 transition-opacity">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setRenamingId(nb.id);
+                            setRenamingName(nb.name);
+                          }}
+                          className="p-1 rounded hover:bg-white/[0.08] text-muted/40 hover:text-accent transition-colors"
+                          title="Rename notebook"
+                        >
+                          <Edit3 size={11} />
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (confirm(`Are you sure you want to delete "${nb.name}"?`)) {
+                              deleteNotebookMutation.mutate(nb.id);
+                            }
+                          }}
+                          className="p-1 rounded hover:bg-white/[0.08] text-muted/40 hover:text-rose-400 transition-colors"
+                          title="Delete notebook"
+                        >
+                          <Trash2 size={11} />
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
               ))}
               {notebooks.length === 0 && (
                 <p className="text-[10px] text-muted/30 px-2.5 py-2">No notebooks yet</p>

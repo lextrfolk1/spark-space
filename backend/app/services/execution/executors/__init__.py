@@ -184,7 +184,17 @@ class SqlExecutor(Executor):
     async def execute(self, plan: ExecutionPlanV2) -> RawResult:
         from app.services.execution.adapters import AdapterRegistry
         
-        if plan.datasource:
+        if plan.engine == "spark_sql":
+            datasource_type = "SPARK"
+            config = {
+                "datasets": plan.datasets,
+                "dataset_frames": plan.context.get("dataset_frames", {}),
+                "postgres_config": plan.connection_config if plan.datasource and plan.datasource.type.upper() in {"POSTGRESQL", "POSTGRES"} else None,
+            }
+            if plan.datasource and plan.datasource.type.upper() in {"SPARK", "SPARK_SQL"}:
+                config["host"] = plan.connection_config.get("host")
+                config["port"] = plan.connection_config.get("port")
+        elif plan.datasource:
             datasource_type = plan.datasource.type
             config = {
                 **plan.connection_config,

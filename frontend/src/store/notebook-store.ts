@@ -28,13 +28,15 @@ type NotebookState = {
   // Active notebook
   activeNotebook: Notebook | null;
   setActiveNotebook: (notebook: Notebook | null) => void;
+  renameNotebook: (notebookId: string, name: string) => Promise<void>;
+  deleteNotebook: (notebookId: string) => Promise<void>;
 
   // Tabs
   openTabs: NotebookTab[];
   activeTabId: string | null;
   openTab: (notebookId: string, name: string) => void;
-  closeTab: (tabId: string) => void;
-  setActiveTab: (tabId: string) => void;
+  closeTab: (tabId: string) => Promise<void>;
+  setActiveTab: (tabId: string) => Promise<void>;
 
   // Cells
   cells: NotebookCell[];
@@ -125,6 +127,66 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       sections: notebook?.sections ?? [],
     }),
 
+  renameNotebook: async (notebookId, name) => {
+    try {
+      await api.updateNotebook(notebookId, { name });
+      set((state) => ({
+        notebooks: state.notebooks.map((n) => n.id === notebookId ? { ...n, name } : n),
+        activeNotebook:
+          state.activeNotebook?.id === notebookId
+            ? { ...state.activeNotebook, name }
+            : state.activeNotebook,
+        openTabs: state.openTabs.map((t) =>
+          t.notebookId === notebookId ? { ...t, name } : t
+        ),
+      }));
+    } catch (err) {
+      console.error("Failed to rename notebook", err);
+    }
+  },
+
+  deleteNotebook: async (notebookId) => {
+    try {
+      await api.deleteNotebook(notebookId);
+      const state = get();
+      const nextNotebooks = state.notebooks.filter((n) => n.id !== notebookId);
+      const nextTabs = state.openTabs.filter((t) => t.notebookId !== notebookId);
+      const nextActiveTabId =
+        state.activeTabId && nextTabs.find((t) => t.id === state.activeTabId)
+          ? state.activeTabId
+          : nextTabs.length > 0
+          ? nextTabs[nextTabs.length - 1].id
+          : null;
+
+      set({
+        notebooks: nextNotebooks,
+        openTabs: nextTabs,
+        activeTabId: nextActiveTabId,
+        activeCellId: null,
+      });
+
+      if (nextActiveTabId) {
+        const activeTab = nextTabs.find((t) => t.id === nextActiveTabId);
+        if (activeTab) {
+          try {
+            const full = await api.getNotebook(activeTab.notebookId);
+            set({
+              activeNotebook: full,
+              cells: full.cells ?? [],
+              sections: full.sections ?? [],
+            });
+          } catch (err) {
+            console.error("Failed to load notebook after deleting notebook", err);
+          }
+        }
+      } else {
+        set({ activeNotebook: null, cells: [], sections: [] });
+      }
+    } catch (err) {
+      console.error("Failed to delete notebook", err);
+    }
+  },
+
   // Tabs
   openTabs: [],
   activeTabId: null,
@@ -140,18 +202,54 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       activeTabId: tab.id,
     }));
   },
-  closeTab: (tabId) =>
-    set((state) => {
-      const tabs = state.openTabs.filter((t) => t.id !== tabId);
-      const newActiveId =
-        state.activeTabId === tabId
-          ? tabs.length > 0
-            ? tabs[tabs.length - 1].id
-            : null
-          : state.activeTabId;
-      return { openTabs: tabs, activeTabId: newActiveId };
-    }),
-  setActiveTab: (tabId) => set({ activeTabId: tabId }),
+  closeTab: async (tabId) => {
+    const state = get();
+    const tabs = state.openTabs.filter((t) => t.id !== tabId);
+    const newActiveId =
+      state.activeTabId === tabId
+        ? tabs.length > 0
+          ? tabs[tabs.length - 1].id
+          : null
+        : state.activeTabId;
+
+    set({ openTabs: tabs, activeTabId: newActiveId, activeCellId: null });
+
+    if (newActiveId) {
+      const activeTab = tabs.find((t) => t.id === newActiveId);
+      if (activeTab) {
+        try {
+          const full = await api.getNotebook(activeTab.notebookId);
+          set({
+            activeNotebook: full,
+            cells: full.cells ?? [],
+            sections: full.sections ?? [],
+          });
+        } catch (err) {
+          console.error("Failed to load notebook after closing tab", err);
+        }
+      }
+    } else {
+      set({ activeNotebook: null, cells: [], sections: [] });
+    }
+  },
+  setActiveTab: async (tabId) => {
+    const tab = get().openTabs.find((t) => t.id === tabId);
+    if (!tab) {
+      set({ activeTabId: null, activeNotebook: null, cells: [], sections: [], activeCellId: null });
+      return;
+    }
+    set({ activeTabId: tabId, activeCellId: null });
+    try {
+      const full = await api.getNotebook(tab.notebookId);
+      set({
+        activeNotebook: full,
+        cells: full.cells ?? [],
+        sections: full.sections ?? [],
+      });
+    } catch (err) {
+      console.error("Failed to load notebook on tab change", err);
+    }
+  },
 
   // Cells
   cells: [createCell("SQL", 0)],

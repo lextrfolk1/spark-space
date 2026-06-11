@@ -171,8 +171,8 @@ export function NotebookCellView({ cell, datasets, datasources, onChange, onDele
           <ChevronDown size={9} className="absolute right-1.5 top-1/2 -translate-y-1/2 pointer-events-none text-muted/30" />
         </div>
 
-        {/* Connection selector (SQL cells only) */}
-        {(cell.cell_type === "SQL" || cell.cell_type === "SPARK_SQL") && (
+        {/* Connection selector (SQL, Spark SQL and DataFrame cells) */}
+        {(cell.cell_type === "SQL" || cell.cell_type === "SPARK_SQL" || cell.cell_type === "PYTHON_DATAFRAME") && (
           <div className="relative inline-flex">
             <select
               className="h-6 pl-1.5 pr-5 text-[10px] rounded-md bg-white/[0.04] border border-white/[0.06] text-ink outline-none appearance-none cursor-pointer max-w-[140px] truncate"

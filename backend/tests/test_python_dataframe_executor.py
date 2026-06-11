@@ -250,5 +250,36 @@ class SqlExecutorAndSparkAdapterTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result.rows, [{"id": 1, "name": "Ada"}])
 
 
+class SparkPostgresIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_register_postgres_tables_in_spark(self) -> None:
+        from app.services.execution.adapters import register_postgres_tables_in_spark
+        
+        mock_spark = MagicMock()
+        postgres_config = {
+            "host": "localhost",
+            "port": 5432,
+            "username": "user",
+            "password": "pwd",
+            "database": "db",
+        }
+        
+        mock_conn = AsyncMock()
+        # Mock information_schema.tables result
+        mock_conn.fetch.side_effect = [
+            # first fetch: query tables
+            [{"table_schema": "public", "table_name": "users"}],
+            # second fetch: SELECT * FROM "public"."users" LIMIT 100
+            [{"id": 1, "name": "Alice"}],
+        ]
+        
+        with patch("asyncpg.connect", return_value=mock_conn) as mock_connect:
+            await register_postgres_tables_in_spark(mock_spark, postgres_config)
+            
+            mock_connect.assert_called_once()
+            # Verify Spark DataFrame creation and view registration
+            mock_spark.createDataFrame.assert_called_once()
+            mock_spark.createDataFrame.return_value.createOrReplaceTempView.assert_any_call("users")
+
+
 if __name__ == "__main__":
     unittest.main()
