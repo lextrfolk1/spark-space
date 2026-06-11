@@ -13,7 +13,7 @@ declare const _default: {
             fontFamily: {
                 display: [string, string];
                 body: [string, string];
-                mono: [string, string];
+                mono: [string, string, string];
             };
             boxShadow: {
                 panel: string;

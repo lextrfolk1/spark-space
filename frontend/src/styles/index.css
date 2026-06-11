@@ -1,45 +1,119 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 :root {
   color-scheme: dark;
-  --color-canvas: #12151b;
-  --color-panel: rgba(24, 28, 36, 0.94);
+  --color-canvas: #0c0e14;
+  --color-panel: rgba(18, 21, 28, 0.95);
   --color-accent: #f2c96d;
-  --color-ink: #f2f4f7;
-  --color-muted: #a4acb9;
-  --color-border: rgba(164, 172, 185, 0.16);
+  --color-ink: #edf0f5;
+  --color-muted: #8b93a3;
+  --color-border: rgba(255, 255, 255, 0.06);
 }
 
 * {
   box-sizing: border-box;
 }
 
-html,
-body,
-#root {
-  min-height: 100%;
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
 }
 
 body {
-  margin: 0;
-  font-family: "IBM Plex Sans", sans-serif;
-  background:
-    radial-gradient(circle at top left, rgba(242, 201, 109, 0.12), transparent 26%),
-    radial-gradient(circle at bottom right, rgba(96, 165, 250, 0.08), transparent 24%),
-    linear-gradient(180deg, #11141a 0%, #151922 42%, #101319 100%);
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
+  background: var(--color-canvas);
   color: var(--color-ink);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
-button,
-input,
-select,
-textarea {
+button, input, select, textarea {
   font: inherit;
 }
 
-pre,
-code {
-  font-family: "IBM Plex Mono", monospace;
+pre, code {
+  font-family: "JetBrains Mono", "IBM Plex Mono", monospace;
+}
+
+/* Scrollbar styles */
+.scrollbar-thin::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 999px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+
+.scrollbar-none {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Main scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+/* Utility classes */
+@layer utilities {
+  .shadow-panel {
+    box-shadow:
+      0 1px 3px rgba(0, 0, 0, 0.2),
+      0 1px 2px rgba(0, 0, 0, 0.12),
+      inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  }
+
+  .glass {
+    background: rgba(18, 21, 28, 0.8);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+  }
+}
+
+/* Monaco editor overrides */
+.monaco-editor {
+  border-radius: 8px;
+}
+
+.monaco-editor .margin {
+  background: transparent !important;
+}
+
+/* Selection styling */
+::selection {
+  background: rgba(242, 201, 109, 0.2);
+  color: var(--color-ink);
 }

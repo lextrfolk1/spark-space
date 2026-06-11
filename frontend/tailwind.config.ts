@@ -13,9 +13,9 @@ export default {
         border: "var(--color-border)",
       },
       fontFamily: {
-        display: ["'Space Grotesk'", "sans-serif"],
-        body: ["'IBM Plex Sans'", "sans-serif"],
-        mono: ["'IBM Plex Mono'", "monospace"],
+        display: ["'Inter'", "sans-serif"],
+        body: ["'Inter'", "sans-serif"],
+        mono: ["'JetBrains Mono'", "'IBM Plex Mono'", "monospace"],
       },
       boxShadow: {
         panel: "0 18px 60px rgba(15, 23, 42, 0.18)",

@@ -52,6 +52,8 @@ async def get_execution(execution_id: str, session: AsyncSession = Depends(get_d
     return ExecutionResponse(
         execution_id=record.id,
         status=record.status,
+        result_type=record.result_type or "TABLE",
+        generated_query=record.generated_query,
         schema=record.schema_json or [],
         rows=record.rows_json or [],
         row_count=len(record.rows_json or []),

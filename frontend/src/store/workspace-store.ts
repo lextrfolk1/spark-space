@@ -1,5 +1,9 @@
+/**
+ * Legacy workspace store — kept for backward compatibility.
+ * New code should use `notebook-store.ts` instead.
+ */
 import { create } from "zustand";
-import { NotebookCell } from "../types/domain";
+import type { CellStatus, NotebookCell } from "../types/domain";
 
 type WorkspaceState = {
   cells: NotebookCell[];
@@ -15,12 +19,16 @@ type WorkspaceState = {
 const createCell = (seed = 1): NotebookCell => ({
   id: crypto.randomUUID(),
   title: `Cell ${seed}`,
+  cell_type: "SQL",
+  input_type: "STRUCTURED_QUERY",
   engine: "spark_sql",
+  content: `SELECT *\nFROM customers\nLIMIT 25;`,
+  order: seed - 1,
+  status: "idle",
+  metadata: {},
+  collapsed: false,
   datasetIds: [],
   datasourceId: undefined,
-  content: `SELECT *\nFROM customers\nLIMIT 25;`,
-  status: "idle",
-  collapsed: false,
 });
 
 export const useWorkspaceStore = create<WorkspaceState>((set) => ({
@@ -50,7 +58,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
             ...current,
             id: crypto.randomUUID(),
             title: `${current.title} Copy`,
-            status: "idle",
+            status: "idle" as CellStatus,
           },
         ],
       };
@@ -66,4 +74,3 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       return { cells };
     }),
 }));
-

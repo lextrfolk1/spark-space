@@ -1,3 +1,134 @@
+// ---------------------------------------------------------------------------
+// Enumerations
+// ---------------------------------------------------------------------------
+
+export type CellType =
+  | "SQL"
+  | "MARKDOWN"
+  | "DATA_PREVIEW"
+  | "RESULT"
+  | "NATURAL_LANGUAGE"
+  | "SPARK_SQL"
+  | "PYTHON_DATAFRAME"
+  | "RULE_ENGINE"
+  | "API_RESPONSE"
+  | "VISUALIZATION"
+  | "LLM_PROMPT";
+
+export type InputType =
+  | "STRUCTURED_QUERY"
+  | "MARKDOWN_TEXT"
+  | "DATASET_PREVIEW"
+  | "USER_INTENT"
+  | "DATAFRAME_COMMAND"
+  | "RULE_DEFINITION"
+  | "API_REQUEST"
+  | "LLM_PROMPT";
+
+export type ResultType =
+  | "TABLE"
+  | "CHART"
+  | "JSON"
+  | "TEXT"
+  | "FILE"
+  | "ERROR"
+  | "EXECUTION_PLAN"
+  | "DATA_PROFILE";
+
+export type CellStatus = "idle" | "running" | "completed" | "failed";
+
+// ---------------------------------------------------------------------------
+// Notebook domain
+// ---------------------------------------------------------------------------
+
+export type Notebook = {
+  id: string;
+  name: string;
+  description?: string | null;
+  is_archived: boolean;
+  sections: NotebookSection[];
+  cells: NotebookCell[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type NotebookListItem = {
+  id: string;
+  name: string;
+  description?: string | null;
+  is_archived: boolean;
+  cell_count: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type NotebookSection = {
+  id: string;
+  notebook_id: string;
+  title: string;
+  order: number;
+  collapsed: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+// ---------------------------------------------------------------------------
+// Cell domain
+// ---------------------------------------------------------------------------
+
+export type NotebookCell = {
+  id: string;
+  notebook_id?: string;
+  section_id?: string | null;
+  cell_type: CellType;
+  input_type: InputType;
+  engine: "spark_sql" | "spark_dataframe" | "rule_engine" | string;
+  content: string;
+  order: number;
+  status: CellStatus;
+  title: string;
+  durationMs?: number;
+  result?: ExecutionResult;
+  last_result?: CellExecuteResponse | null;
+  metadata: Record<string, unknown>;
+  collapsed: boolean;
+
+  // Legacy compat
+  datasourceId?: string;
+  datasetIds: string[];
+};
+
+// ---------------------------------------------------------------------------
+// Cell execution DTO contract
+// ---------------------------------------------------------------------------
+
+export type CellExecuteRequest = {
+  cellType: CellType;
+  inputType: InputType;
+  content: string;
+  context: Record<string, unknown>;
+};
+
+export type CellExecuteResponse = {
+  execution_id: string;
+  status: string;
+  execution_type: string;
+  result_type: ResultType;
+  generated_query?: string | null;
+  columns: string[];
+  schema: Array<Record<string, unknown>>;
+  rows: Array<Record<string, unknown>>;
+  row_count: number;
+  metadata: Record<string, unknown>;
+  logs: string[];
+  warnings: string[];
+  error?: string | null;
+};
+
+// ---------------------------------------------------------------------------
+// Datasource / Dataset / Execution
+// ---------------------------------------------------------------------------
+
 export type Datasource = {
   id: string;
   name: string;
@@ -57,19 +188,7 @@ export type UploadResult = {
   detected_format: string;
 };
 
-export type NotebookCell = {
-  id: string;
-  title: string;
-  engine: "spark_sql" | "spark_dataframe" | "rule_engine";
-  datasourceId?: string;
-  datasetIds: string[];
-  content: string;
-  status: "idle" | "running" | "completed" | "failed";
-  durationMs?: number;
-  result?: ExecutionResult;
-  collapsed: boolean;
-};
-
+// Legacy execution types (kept for backward compat with old workspace)
 export type ExecutionRequest = {
   engine: string;
   datasource_id?: string;
@@ -115,3 +234,20 @@ export type LogEntry = {
   message: string;
 };
 
+// ---------------------------------------------------------------------------
+// UI State types
+// ---------------------------------------------------------------------------
+
+export type NotebookTab = {
+  id: string;
+  notebookId: string;
+  name: string;
+};
+
+export type PanelVisibility = {
+  leftSidebar: boolean;
+  rightSidebar: boolean;
+  bottomPanel: boolean;
+};
+
+export type BottomPanelTab = "results" | "logs" | "history" | "execution-plan";

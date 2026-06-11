@@ -20,6 +20,8 @@ class ExecutionRequest(BaseModel):
 class ExecutionResponse(BaseModel):
     execution_id: str
     status: str
+    result_type: str = "TABLE"
+    generated_query: str | None = None
     schema: list[dict[str, Any]] = Field(default_factory=list)
     rows: list[dict[str, Any]] = Field(default_factory=list)
     row_count: int = 0

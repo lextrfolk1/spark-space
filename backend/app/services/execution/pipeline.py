@@ -490,9 +490,18 @@ class ExecutionService:
         await session.commit()
         await session.refresh(record)
 
+        # Determine result type for the renderer framework
+        if payload.error:
+            result_type = "ERROR"
+        elif payload.rows:
+            result_type = "TABLE"
+        else:
+            result_type = "TEXT"
+
         return ExecutionResponse(
             execution_id=record.id,
             status=payload.status,
+            result_type=result_type,
             schema=payload.schema,
             rows=payload.rows,
             row_count=len(payload.rows),

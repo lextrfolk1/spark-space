@@ -72,6 +72,6 @@ sequenceDiagram
 - `components/layout`: shell and navigation
 - `components/notebook`: notebook workspace and cell renderer
 - `features/*/pages`: route-level screens for datasets, connections, history, logs, and settings
-- `store/workspace-store.ts`: notebook cell state and orchestration
+- `store/notebook-store.ts`: notebook cell state and orchestration
 - `lib/api.ts`: shared API client
 
