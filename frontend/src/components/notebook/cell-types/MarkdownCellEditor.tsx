@@ -1,4 +1,5 @@
 import Editor from "@monaco-editor/react";
+import { useNotebookStore } from "../../../store/notebook-store";
 
 type Props = {
   content: string;
@@ -6,12 +7,15 @@ type Props = {
 };
 
 export function MarkdownCellEditor({ content, onChange }: Props) {
+  const { theme } = useNotebookStore();
+  const isLight = theme === "light-clean";
+
   return (
     <div className="border border-white/[0.06] rounded-lg overflow-hidden bg-slate-950">
       <Editor
         height="140px"
         language="markdown"
-        theme="vs-dark"
+        theme={isLight ? "light" : "vs-dark"}
         value={content}
         options={{
           minimap: { enabled: false },

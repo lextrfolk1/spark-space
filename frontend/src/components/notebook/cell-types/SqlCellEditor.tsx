@@ -1,5 +1,6 @@
 import { useRef } from "react";
 import Editor from "@monaco-editor/react";
+import { useNotebookStore } from "../../../store/notebook-store";
 
 type Props = {
   content: string;
@@ -12,13 +13,15 @@ type Props = {
 export function SqlCellEditor({ content, language = "sql", onChange, onRun, onEditorMount }: Props) {
   const runRef = useRef(onRun);
   runRef.current = onRun;
+  const { theme } = useNotebookStore();
+  const isLight = theme === "light-clean";
 
   return (
     <div className="border border-white/[0.06] rounded-lg overflow-hidden bg-slate-950">
       <Editor
         height="140px"
         language={language}
-        theme="vs-dark"
+        theme={isLight ? "light" : "vs-dark"}
         value={content}
         options={{
           minimap: { enabled: false },

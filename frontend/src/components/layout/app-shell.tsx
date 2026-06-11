@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { Outlet, NavLink, useLocation } from "react-router-dom";
 import {
   Activity,
@@ -29,8 +30,24 @@ const navItems = [
 
 export function AppShell() {
   const location = useLocation();
-  const { panels, togglePanel } = useNotebookStore();
+  const { panels, togglePanel, theme } = useNotebookStore();
   const isWorkspace = location.pathname === "/workspace" || location.pathname === "/";
+
+  useEffect(() => {
+    // Remove previous theme- classes
+    const classes = Array.from(document.documentElement.classList);
+    classes.forEach((c) => {
+      if (c.startsWith("theme-")) {
+        document.documentElement.classList.remove(c);
+      }
+    });
+    document.documentElement.classList.add(`theme-${theme}`);
+    if (theme === "light-clean") {
+      document.documentElement.style.colorScheme = "light";
+    } else {
+      document.documentElement.style.colorScheme = "dark";
+    }
+  }, [theme]);
 
   return (
     <div className="h-screen flex flex-col overflow-hidden bg-canvas text-ink">

@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Plus, Play, Trash2, Search, FileCode, Type, Database, ChevronDown } from "lucide-react";
+import { Plus, Play, Trash2, Search, FileCode, Database, ChevronDown, Sparkles, Terminal, Bot } from "lucide-react";
 import { clsx } from "clsx";
 import { api } from "../../lib/api";
 import { useNotebookStore } from "../../store/notebook-store";
@@ -38,6 +38,22 @@ export function NotebookWorkspace() {
         c.cell_type.toLowerCase().includes(q)
     );
   }, [cells, searchQuery]);
+
+  if (!activeNotebook) {
+    return (
+      <div className="flex flex-col items-center justify-center py-24 px-4 text-center space-y-4 w-full h-full min-h-[400px]">
+        <div className="w-16 h-16 rounded-2xl bg-accent/5 flex items-center justify-center border border-accent/10 shadow-sm">
+          <FileCode size={28} className="text-accent" />
+        </div>
+        <div>
+          <h3 className="text-sm font-bold text-ink">No active notebook</h3>
+          <p className="text-xs text-muted mt-1 max-w-xs mx-auto leading-relaxed">
+            Create a new notebook using the <span className="text-accent font-semibold">+</span> button in the left sidebar, or select an existing notebook to get started.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-2 w-full">
@@ -99,7 +115,9 @@ export function NotebookWorkspace() {
         {/* Add cell buttons */}
         <div className="flex items-center gap-1">
           <AddCellButton icon={FileCode} label="SQL" onClick={() => addCell("SQL")} />
-          <AddCellButton icon={Type} label="MD" onClick={() => addCell("MARKDOWN")} />
+          <AddCellButton icon={Sparkles} label="Spark SQL" onClick={() => addCell("SPARK_SQL")} />
+          <AddCellButton icon={Terminal} label="DataFrame" onClick={() => addCell("PYTHON_DATAFRAME")} />
+          <AddCellButton icon={Bot} label="NL Query" onClick={() => addCell("NATURAL_LANGUAGE")} />
         </div>
       </div>
 

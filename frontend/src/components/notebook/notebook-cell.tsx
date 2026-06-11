@@ -44,7 +44,7 @@ const CELL_TYPE_META: Record<string, {
   PYTHON_DATAFRAME: { label: "DataFrame", accent: "bg-sky-500", accentBorder: "border-sky-500/30", language: "python" },
 };
 
-const AVAILABLE_CELL_TYPES: CellType[] = ["SQL", "NATURAL_LANGUAGE", "MARKDOWN"];
+const AVAILABLE_CELL_TYPES: CellType[] = ["SQL", "NATURAL_LANGUAGE", "SPARK_SQL", "PYTHON_DATAFRAME"];
 
 const STATUS_DOTS: Record<string, string> = {
   idle: "bg-white/20",
@@ -291,7 +291,7 @@ export function NotebookCellView({ cell, datasets, datasources, onChange, onDele
         <div className="border-t border-white/[0.04] pl-4 pr-2 py-2 space-y-2">
           {/* Result tabs */}
           <div className="flex items-center gap-0.5">
-            {(["table", "schema", "logs"] as const).map((tab) => (
+            {(["table", "logs"] as const).map((tab) => (
               <button
                 key={tab}
                 className={clsx(
@@ -338,10 +338,6 @@ export function NotebookCellView({ cell, datasets, datasources, onChange, onDele
                 <ResultRenderer result={result} />
               )}
             </div>
-          )}
-
-          {resultTab === "schema" && result?.schema && (
-            <ResultRenderer result={result} className="max-h-48" />
           )}
 
           {resultTab === "logs" && result && (

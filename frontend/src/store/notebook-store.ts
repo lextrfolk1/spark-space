@@ -66,6 +66,10 @@ type NotebookState = {
   // Execution history for bottom panel
   executionHistory: CellExecuteResponse[];
   addExecutionResult: (result: CellExecuteResponse) => void;
+
+  // Global theme
+  theme: "dark-sunset" | "dark-ocean" | "dark-forest" | "light-clean";
+  setTheme: (theme: "dark-sunset" | "dark-ocean" | "dark-forest" | "light-clean") => void;
 };
 
 // ---------------------------------------------------------------------------
@@ -316,4 +320,11 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
     set((state) => ({
       executionHistory: [result, ...state.executionHistory].slice(0, 100),
     })),
+
+  // Global theme
+  theme: (localStorage.getItem("sparkspace-theme") as any) || "light-clean",
+  setTheme: (theme) => {
+    localStorage.setItem("sparkspace-theme", theme);
+    set({ theme });
+  },
 }));
