@@ -74,10 +74,7 @@ export function NotebookCellView({
   const selectedDatasets = datasets.filter((dataset) => cell.datasetIds.includes(dataset.id));
   const currentDatasource = datasources.find((item) => item.id === cell.datasourceId);
 
-  const datasetOptions = useMemo(
-    () => datasets.map((dataset) => ({ id: dataset.id, label: dataset.name })),
-    [datasets],
-  );
+
 
   const run = async () => {
     onChange({ status: "running" });
@@ -85,7 +82,7 @@ export function NotebookCellView({
       const result = await api.execute({
         engine: cell.engine,
         datasource_id: cell.datasourceId,
-        dataset_ids: cell.datasetIds,
+        dataset_ids: cell.datasourceId ? [] : cell.datasetIds,
         command: cell.content,
         execution_mode: "current_cell",
         context: { cellId: cell.id },
@@ -94,6 +91,7 @@ export function NotebookCellView({
         status: result.status === "completed" ? "completed" : "failed",
         durationMs: result.execution_time_ms,
         result,
+        datasetIds: result.dataset_ids || [],
       });
       startTransition(() => setActiveTab(result.error ? "logs" : "results"));
     } catch (error) {
@@ -203,7 +201,7 @@ export function NotebookCellView({
         <div className="mt-3 flex flex-wrap gap-2 text-xs text-muted">
           <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">{meta.hint}</span>
         </div>
-        <div className="mt-4 grid gap-3 xl:grid-cols-[180px_1fr_1fr_170px]">
+        <div className="mt-4 grid gap-3 xl:grid-cols-[180px_1fr_170px]">
           <Select value={cell.engine} onChange={(event) => onChange({ engine: event.target.value as NotebookCell["engine"] })}>
             <option value="spark_sql">Spark SQL</option>
             <option value="spark_dataframe">Spark DataFrame</option>
@@ -214,17 +212,6 @@ export function NotebookCellView({
             {datasources.map((item) => (
               <option key={item.id} value={item.id}>
                 {item.name}
-              </option>
-            ))}
-          </Select>
-          <Select
-            value={cell.datasetIds[0] ?? ""}
-            onChange={(event) => onChange({ datasetIds: event.target.value ? [event.target.value] : [] })}
-          >
-            <option value="">{meta.datasetLabel}</option>
-            {datasetOptions.map((option) => (
-              <option key={option.id} value={option.id}>
-                {option.label}
               </option>
             ))}
           </Select>

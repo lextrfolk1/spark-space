@@ -93,6 +93,7 @@ export type ExecutionResult = {
   error?: string | null;
   execution_time_ms: number;
   statistics: Record<string, unknown>;
+  dataset_ids?: string[];
 };
 
 export type ExecutionHistoryItem = {

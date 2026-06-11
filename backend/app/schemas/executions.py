@@ -29,6 +29,7 @@ class ExecutionResponse(BaseModel):
     error: str | None = None
     execution_time_ms: int
     statistics: dict[str, Any] = Field(default_factory=dict)
+    dataset_ids: list[str] = Field(default_factory=list)
 
 
 class ExecutionHistoryItem(BaseModel):

@@ -91,12 +91,8 @@ class SparkSqlExecutor:
 
         logs = ["Execution routed through SparkSqlExecutor."]
         warnings: list[str] = []
-        if plan.datasource is not None and plan.datasets:
-            warnings.append(
-                f"Validated datasource `{plan.datasource.name}` but executed against selected registered datasets in local mode."
-            )
 
-        if plan.datasource is not None and not plan.datasets:
+        if plan.datasource is not None:
             try:
                 result_frame, live_statistics = await _execute_live_sql(plan, plan.command, plan.limit)
             except Exception as exc:
@@ -184,7 +180,9 @@ class SparkDataFrameExecutor:
                     engine="spark_dataframe",
                 )
         else:
-            dataset = self._resolve_dataset(plan)
+            dataset = next((ds for ds in plan.datasets if ds.name == base_name), None)
+            if dataset is None:
+                dataset = self._resolve_dataset(plan)
             if dataset is None:
                 message = "Select a registered dataset before running Spark DataFrame commands."
                 if plan.datasource is not None:
@@ -427,7 +425,19 @@ class ExecutionService:
     async def execute(self, session: AsyncSession, request: ExecutionRequest) -> ExecutionResponse:
         started = time.perf_counter()
         parsed = self.parser.parse(request)
-        datasets = await self._load_datasets(session, request.dataset_ids)
+        
+        # Automatically detect referenced datasets (only if no datasource is selected)
+        detected_dataset_ids = [] if request.datasource_id is not None else list(request.dataset_ids)
+        if request.datasource_id is None:
+            all_datasets_stmt = select(DatasetRecord)
+            all_datasets_result = await session.execute(all_datasets_stmt)
+            all_datasets = all_datasets_result.scalars().all()
+            for ds in all_datasets:
+                pattern = re.compile(rf"\b{re.escape(ds.name)}\b", re.IGNORECASE)
+                if pattern.search(request.command) and ds.id not in detected_dataset_ids:
+                    detected_dataset_ids.append(ds.id)
+                
+        datasets = await self._load_datasets(session, detected_dataset_ids)
         missing_dataset_ids = [dataset_id for dataset_id in request.dataset_ids if dataset_id not in {row.id for row in datasets}]
         datasource = await self._load_datasource(session, request.datasource_id)
         execution_limit = min(
@@ -464,7 +474,7 @@ class ExecutionService:
 
         record = ExecutionRecord(
             engine=request.engine,
-            dataset_id=request.dataset_ids[0] if request.dataset_ids else None,
+            dataset_id=detected_dataset_ids[0] if detected_dataset_ids else None,
             datasource_id=request.datasource_id,
             command=request.command,
             status=payload.status,
@@ -492,6 +502,7 @@ class ExecutionService:
             error=payload.error,
             execution_time_ms=duration_ms,
             statistics=payload.statistics,
+            dataset_ids=detected_dataset_ids,
         )
 
     async def history(self, session: AsyncSession) -> list[ExecutionRecord]:
