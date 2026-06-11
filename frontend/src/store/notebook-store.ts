@@ -37,6 +37,7 @@ type NotebookState = {
   openTab: (notebookId: string, name: string) => void;
   closeTab: (tabId: string) => Promise<void>;
   setActiveTab: (tabId: string) => Promise<void>;
+  reorderTabs: (oldIndex: number, newIndex: number) => void;
 
   // Cells
   cells: NotebookCell[];
@@ -249,6 +250,12 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
     } catch (err) {
       console.error("Failed to load notebook on tab change", err);
     }
+  },
+  reorderTabs: (oldIndex, newIndex) => {
+    const tabs = [...get().openTabs];
+    const [removed] = tabs.splice(oldIndex, 1);
+    tabs.splice(newIndex, 0, removed);
+    set({ openTabs: tabs });
   },
 
   // Cells

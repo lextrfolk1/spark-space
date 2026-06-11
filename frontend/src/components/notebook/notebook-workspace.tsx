@@ -26,21 +26,41 @@ export function NotebookWorkspace() {
     searchQuery,
     setSearchQuery,
     renameNotebook,
+    reorderTabs,
   } = useNotebookStore();
 
   const queryClient = useQueryClient();
-  const [isRenamingTitle, setIsRenamingTitle] = useState(false);
-  const [renamingTitleName, setRenamingTitleName] = useState("");
+  const [renamingTabId, setRenamingTabId] = useState<string | null>(null);
+  const [renamingTabName, setRenamingTabName] = useState("");
+  const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
 
-  const handleRenameTitle = async () => {
-    if (!activeNotebook) return;
-    if (!renamingTitleName.trim() || renamingTitleName.trim() === activeNotebook.name) {
-      setIsRenamingTitle(false);
+  const handleRenameTabSubmit = async (notebookId: string) => {
+    if (!renamingTabName.trim()) {
+      setRenamingTabId(null);
       return;
     }
-    await renameNotebook(activeNotebook.id, renamingTitleName.trim());
+    await renameNotebook(notebookId, renamingTabName.trim());
     queryClient.invalidateQueries({ queryKey: ["notebooks"] });
-    setIsRenamingTitle(false);
+    setRenamingTabId(null);
+  };
+
+  const handleDragStart = (e: React.DragEvent, index: number) => {
+    setDraggedIndex(index);
+    e.dataTransfer.effectAllowed = "move";
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+  };
+
+  const handleDrop = (index: number) => {
+    if (draggedIndex !== null && draggedIndex !== index) {
+      reorderTabs(draggedIndex, index);
+    }
+  };
+
+  const handleDragEnd = () => {
+    setDraggedIndex(null);
   };
 
   // Filter cells by search
@@ -75,22 +95,53 @@ export function NotebookWorkspace() {
     <div className="space-y-2 w-full">
       {/* Notebook tabs */}
       {openTabs.length > 0 && (
-        <div className="flex items-center gap-0.5 px-1 overflow-x-auto scrollbar-none">
-          {openTabs.map((tab) => (
+        <div className="flex items-center gap-0.5 px-1 overflow-x-auto scrollbar-none border-b border-white/[0.04] pb-1">
+          {openTabs.map((tab, index) => (
             <button
               key={tab.id}
+              draggable
+              onDragStart={(e) => handleDragStart(e, index)}
+              onDragOver={handleDragOver}
+              onDrop={() => handleDrop(index)}
+              onDragEnd={handleDragEnd}
               className={clsx(
-                "flex items-center gap-1.5 px-3 py-1.5 rounded-t-lg text-xs font-medium transition-colors shrink-0",
+                "flex items-center gap-1.5 px-3 py-1.5 rounded-t-lg text-xs font-medium transition-all shrink-0 cursor-grab active:cursor-grabbing border border-transparent select-none",
                 activeTabId === tab.id
-                  ? "bg-slate-900/80 text-ink border border-white/[0.06] border-b-0"
-                  : "text-muted/40 hover:text-muted hover:bg-white/[0.02]"
+                  ? "bg-slate-900/80 text-ink border-white/[0.06] border-b-transparent font-semibold"
+                  : "text-muted/40 hover:text-muted hover:bg-white/[0.02]",
+                index === draggedIndex && "opacity-40 border-dashed border-accent/20"
               )}
               onClick={() => setActiveTab(tab.id)}
+              onDoubleClick={() => {
+                if (activeTabId === tab.id) {
+                  setRenamingTabId(tab.id);
+                  setRenamingTabName(tab.name);
+                }
+              }}
             >
-              <FileCode size={12} />
-              <span className="max-w-[120px] truncate">{tab.name}</span>
+              <FileCode size={12} className={clsx(activeTabId === tab.id ? "text-amber-400/80" : "text-muted/30")} />
+              {renamingTabId === tab.id ? (
+                <input
+                  type="text"
+                  value={renamingTabName}
+                  onChange={(e) => setRenamingTabName(e.target.value)}
+                  onKeyDown={async (e) => {
+                    if (e.key === "Enter") {
+                      await handleRenameTabSubmit(tab.notebookId);
+                    } else if (e.key === "Escape") {
+                      setRenamingTabId(null);
+                    }
+                  }}
+                  onBlur={() => handleRenameTabSubmit(tab.notebookId)}
+                  autoFocus
+                  onClick={(e) => e.stopPropagation()}
+                  className="bg-slate-950 border border-accent/40 rounded px-1 py-0.5 text-[11px] text-ink outline-none w-[90px] font-normal"
+                />
+              ) : (
+                <span className="max-w-[120px] truncate" title="Double-click to rename">{tab.name}</span>
+              )}
               <button
-                className="ml-1 text-muted/30 hover:text-rose-400 transition-colors"
+                className="ml-1 text-muted/30 hover:text-rose-400 transition-colors text-xs font-bold w-3.5 h-3.5 flex items-center justify-center rounded-full hover:bg-white/[0.05]"
                 onClick={(e) => {
                   e.stopPropagation();
                   closeTab(tab.id);
@@ -102,53 +153,6 @@ export function NotebookWorkspace() {
           ))}
         </div>
       )}
-
-      {/* Notebook Header Title */}
-      <div className="flex items-center justify-between border-b border-white/[0.04] pb-2 px-1 pt-1">
-        <div className="flex items-center gap-2">
-          <FileCode className="text-amber-400/60" size={15} />
-          {isRenamingTitle ? (
-            <input
-              type="text"
-              value={renamingTitleName}
-              onChange={(e) => setRenamingTitleName(e.target.value)}
-              onKeyDown={async (e) => {
-                if (e.key === "Enter") {
-                  await handleRenameTitle();
-                } else if (e.key === "Escape") {
-                  setIsRenamingTitle(false);
-                }
-              }}
-              onBlur={handleRenameTitle}
-              autoFocus
-              className="bg-slate-900 border border-accent/20 rounded px-2 py-0.5 text-xs font-bold text-ink outline-none"
-            />
-          ) : (
-            <div className="flex items-center gap-1.5 group/title">
-              <h2
-                className="text-xs font-bold text-ink cursor-pointer hover:text-accent transition-colors"
-                onClick={() => {
-                  setIsRenamingTitle(true);
-                  setRenamingTitleName(activeNotebook.name);
-                }}
-                title="Click to rename"
-              >
-                {activeNotebook.name}
-              </h2>
-              <button
-                onClick={() => {
-                  setIsRenamingTitle(true);
-                  setRenamingTitleName(activeNotebook.name);
-                }}
-                className="opacity-0 group-hover/title:opacity-100 p-0.5 rounded hover:bg-white/[0.04] transition-all text-muted/40 hover:text-ink"
-                title="Rename notebook"
-              >
-                <Edit3 size={11} />
-              </button>
-            </div>
-          )}
-        </div>
-      </div>
 
       {/* Toolbar */}
       <div className="flex items-center gap-2 px-1">
