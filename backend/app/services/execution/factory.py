@@ -110,6 +110,7 @@ def get_executor_factory() -> ExecutorFactory:
         from app.services.execution.executors.markdown_executor import MarkdownExecutor
         from app.services.execution.executors.dataset_preview_executor import DatasetPreviewExecutor
         from app.services.execution.executors.natural_language_executor import NaturalLanguageExecutor
+        from app.services.execution.executors.python_dataframe_executor import PythonDataFrameExecutor
         
         sql_exec = SqlExecutor()
         _factory.register("SQL", sql_exec)
@@ -118,6 +119,7 @@ def get_executor_factory() -> ExecutorFactory:
         _factory.register("MARKDOWN", MarkdownExecutor())
         _factory.register("DATA_PREVIEW", DatasetPreviewExecutor())
         _factory.register("NATURAL_LANGUAGE", NaturalLanguageExecutor())
+        _factory.register("PYTHON_DATAFRAME", PythonDataFrameExecutor())
         
         _factory.set_default(sql_exec)
         
