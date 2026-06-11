@@ -125,6 +125,52 @@ class PostgresAdapter(DataSourceAdapter):
                     "SELECT set_config('search_path', $1, false)", schema_name
                 )
 
+            # Register uploaded datasets as temporary tables in PostgreSQL
+            datasets = self._config.get("datasets", [])
+            frames = self._config.get("dataset_frames", {})
+            import re
+            from pathlib import Path
+            import numpy as np
+
+            def _pandas_type_to_postgres(dtype) -> str:
+                name = str(dtype).lower()
+                if "int" in name:
+                    return "INTEGER"
+                elif "float" in name or "double" in name or "decimal" in name:
+                    return "DOUBLE PRECISION"
+                elif "bool" in name:
+                    return "BOOLEAN"
+                elif "datetime" in name or "timestamp" in name:
+                    return "TIMESTAMP"
+                else:
+                    return "TEXT"
+
+            for dataset in datasets:
+                frame = frames.get(dataset.id)
+                if frame is None:
+                    frame = frames.get(dataset.name)
+                if frame is not None:
+                    clean_name = re.sub(r'[^a-zA-Z0-9_]', '_', dataset.name)
+                    stem_name = Path(dataset.name).stem
+                    clean_stem = re.sub(r'[^a-zA-Z0-9_]', '_', stem_name)
+
+                    tables_to_create = set()
+                    for n in [dataset.name, clean_name, stem_name, clean_stem, dataset.name.lower(), clean_name.lower(), stem_name.lower(), clean_stem.lower()]:
+                        if n:
+                            tables_to_create.add(n)
+
+                    columns_definition = ", ".join(f'"{col}" {_pandas_type_to_postgres(dtype)}' for col, dtype in frame.dtypes.items())
+                    records = [
+                        tuple(None if pd.isna(val) else val for val in row)
+                        for row in frame.itertuples(index=False)
+                    ]
+
+                    for table_name in tables_to_create:
+                        await connection.execute(f'DROP TABLE IF EXISTS "{table_name}"')
+                        await connection.execute(f'CREATE TEMPORARY TABLE "{table_name}" ({columns_definition})')
+                        if records:
+                            await connection.copy_records_to_table(table_name, records=records, columns=list(frame.columns))
+
             stripped = query.strip().rstrip(";")
             limited = f"SELECT * FROM ({stripped}) AS workspace_result LIMIT {limit}"
             statement = await connection.prepare(limited)
@@ -167,7 +213,8 @@ class PostgresAdapter(DataSourceAdapter):
 class SparkAdapter(DataSourceAdapter):
     """
     Adapter for Spark SQL via Spark Connect.
-    Wraps the existing Spark Connect logic from the pipeline.
+    Wraps the Spark Connect logic to connect to a remote Spark service and run queries,
+    automatically registering local datasets as temporary views.
     """
 
     def __init__(self) -> None:
@@ -177,12 +224,68 @@ class SparkAdapter(DataSourceAdapter):
         self._config = config
 
     async def execute_query(self, query: str, limit: int = 100) -> RawResult:
-        # Delegates to existing Spark logic in pipeline.py
-        return RawResult(
-            status="completed",
-            logs=["Spark adapter execution placeholder."],
-            result_type="TABLE",
-        )
+        import asyncio
+        from pyspark.sql import SparkSession
+        import logging
+        logger = logging.getLogger(__name__)
+
+        host = self._config.get("host", "spark")
+        port = self._config.get("port", 15002)
+        remote = f"sc://{host}:{port}"
+
+        try:
+            spark = await asyncio.to_thread(self._get_spark_session, remote)
+
+            # Register datasets as temp views
+            datasets = self._config.get("datasets", [])
+            frames = self._config.get("dataset_frames", {})
+            for dataset in datasets:
+                frame = frames.get(dataset.id)
+                if frame is not None:
+                    await asyncio.to_thread(self._register_dataset, spark, dataset.name, frame)
+
+            # Run the query
+            def run_sql():
+                df = spark.sql(query.strip().rstrip(";")).limit(limit)
+                pandas_frame = df.toPandas()
+                if pandas_frame.empty:
+                    pandas_frame = pd.DataFrame(columns=df.columns)
+                return pandas_frame
+
+            result_frame = await asyncio.to_thread(run_sql)
+            schema = [{"name": name, "type": str(dtype)} for name, dtype in result_frame.dtypes.items()]
+            rows = json.loads(result_frame.to_json(orient="records", date_format="iso"))
+
+            return RawResult(
+                status="completed",
+                columns=list(result_frame.columns),
+                schema=schema,
+                rows=rows,
+                statistics={"returnedRows": len(rows), "engine": "spark_sql", "host": host},
+                logs=[
+                    "Connected to Spark Connect session.",
+                    "SQL query executed on remote Spark cluster."
+                ],
+            )
+        except Exception as exc:
+            logger.error(f"Spark Connect query failed: {exc}", exc_info=True)
+            return RawResult(status="failed", error=str(exc))
+
+    def _get_spark_session(self, remote: str) -> SparkSession:
+        from app.services.execution.pipeline import _get_spark_connect_session
+        return _get_spark_connect_session(remote, self._config)
+
+    def _register_dataset(self, spark: SparkSession, name: str, frame: pd.DataFrame) -> None:
+        import re
+        clean_name = re.sub(r'[^a-zA-Z0-9_]', '_', name)
+        try:
+            spark_df = spark.createDataFrame(frame)
+            spark_df.createOrReplaceTempView(clean_name)
+            if clean_name != name:
+                spark_df.createOrReplaceTempView(name)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"Failed to register Spark view for {name}: {e}")
 
     async def get_schema(self, table_name: str | None = None) -> list[dict[str, Any]]:
         return []

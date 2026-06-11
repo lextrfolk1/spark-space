@@ -55,33 +55,53 @@ class SqlExecutor(Executor):
         context = request.context
         
         datasource_id = context.get("connectionId")
+        if not datasource_id:
+            datasource_id = "spark_local"
+            
         datasource = None
-        
-        if datasource_id and session:
-            from app.models.entities import DatasourceRecord
-            datasource = await session.get(DatasourceRecord, datasource_id)
+        if datasource_id:
+            from app.core.config import get_settings
+            settings = get_settings()
+            datasource = next(
+                (item for item in settings.datasource.configured_connections if item.id == datasource_id),
+                None,
+            )
+            if not datasource and session:
+                from app.models.entities import DatasourceRecord
+                datasource = await session.get(DatasourceRecord, datasource_id)
             
         connection_config = {}
         if datasource:
             from app.core.config import get_settings
-            from app.services.execution.pipeline import CredentialCipher
             settings = get_settings()
-            cipher = CredentialCipher(settings.app_credential_key)
             
-            connection_config = {
-                "host": datasource.host,
-                "port": datasource.port,
-                "username": datasource.username,
-                "password": cipher.decrypt(datasource.encrypted_password) if datasource.encrypted_password else "",
-                "database": datasource.database,
-                "schema_name": datasource.schema_name,
-            }
+            if hasattr(datasource, "encrypted_password"):
+                from app.services.execution.pipeline import CredentialCipher
+                cipher = CredentialCipher(settings.app_credential_key)
+                password = cipher.decrypt(datasource.encrypted_password) if datasource.encrypted_password else ""
+                connection_config = {
+                    "host": datasource.host,
+                    "port": datasource.port,
+                    "username": datasource.username,
+                    "password": password,
+                    "database": datasource.database,
+                    "schema_name": datasource.schema_name,
+                }
+            else:
+                connection_config = {
+                    "host": datasource.host,
+                    "port": datasource.port,
+                    "username": getattr(datasource, "username", None),
+                    "password": getattr(datasource, "password", ""),
+                    "database": datasource.database,
+                    "schema_name": datasource.schema_name,
+                }
             
-        # Resolve referenced datasets if no live database connection is selected
+        # Resolve referenced datasets
         datasets = []
         dataset_frames = {}
         plan_warnings = []
-        if not datasource_id and session:
+        if session:
             from app.models.entities import DatasetRecord
             from sqlalchemy import select
             
@@ -139,6 +159,7 @@ class SqlExecutor(Executor):
                         delimiter=metadata.get("delimiter", ","),
                         has_header=metadata.get("has_header", True),
                     )
+                    dataset_frames[dataset.id] = frame
                     dataset_frames[dataset.name] = frame
                 except Exception as e:
                     logger.error(f"Failed to load dataset {dataset.name} from {dataset.location}: {e}", exc_info=True)
@@ -165,7 +186,11 @@ class SqlExecutor(Executor):
         
         if plan.datasource:
             datasource_type = plan.datasource.type
-            config = plan.connection_config
+            config = {
+                **plan.connection_config,
+                "datasets": plan.datasets,
+                "dataset_frames": plan.context.get("dataset_frames", {}),
+            }
         else:
             datasource_type = "SQLITE"
             config = {
