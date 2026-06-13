@@ -280,6 +280,42 @@ class SparkPostgresIntegrationTests(unittest.IsolatedAsyncioTestCase):
             mock_spark.createDataFrame.assert_called_once()
             mock_spark.createDataFrame.return_value.createOrReplaceTempView.assert_any_call("users")
 
+    async def test_register_postgres_tables_in_spark_with_custom_schema(self) -> None:
+        from app.services.execution.adapters import register_postgres_tables_in_spark
+        
+        mock_spark = MagicMock()
+        postgres_config = {
+            "host": "localhost",
+            "port": 5432,
+            "username": "user",
+            "password": "pwd",
+            "database": "db",
+            "schema_name": "meta",
+        }
+        
+        mock_conn = AsyncMock()
+        # Mock information_schema.tables result
+        mock_conn.fetch.side_effect = [
+            # first fetch: query tables
+            [{"table_schema": "meta", "table_name": "rule_type"}],
+            # second fetch: SELECT * FROM "meta"."rule_type" LIMIT 100
+            [{"id": 1, "rule": "custom"}],
+        ]
+        
+        with patch("asyncpg.connect", return_value=mock_conn) as mock_connect:
+            await register_postgres_tables_in_spark(mock_spark, postgres_config)
+            
+            mock_connect.assert_called_once()
+            # Verify Spark database creation SQL call was made
+            mock_spark.sql.assert_any_call("CREATE DATABASE IF NOT EXISTS `meta`")
+            # Verify Spark DataFrame creation and view registration
+            mock_spark.createDataFrame.assert_called_once()
+            mock_spark.createDataFrame.return_value.createOrReplaceTempView.assert_any_call("meta.rule_type")
+            mock_spark.createDataFrame.return_value.createOrReplaceTempView.assert_any_call("rule_type")
+            mock_spark.createDataFrame.return_value.createOrReplaceTempView.assert_any_call("meta_rule_type")
+            # Verify saveAsTable was called to write the table to catalog database
+            mock_spark.createDataFrame.return_value.write.mode.return_value.saveAsTable.assert_any_call("`meta`.`rule_type`")
+
 
 if __name__ == "__main__":
     unittest.main()

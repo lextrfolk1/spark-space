@@ -1,16 +1,13 @@
 """
 Python DataFrame Executor — handles PYTHON_DATAFRAME cell type execution.
-
-Delegates execution to SparkDataFrameExecutor from the pipeline module
-while implementing the new 4-phase Executor interface.
+Routes execution to Spark Connect or falls back to local Pandas dataframe evaluator.
 """
 from __future__ import annotations
 
-import ast
-import re
-from pathlib import Path
-from typing import Any
 import logging
+import asyncio
+import time
+from typing import Any
 
 from app.schemas.notebooks import CellExecuteRequest, CellExecuteResponse
 from app.services.execution.base import (
@@ -19,6 +16,8 @@ from app.services.execution.base import (
     RawResult,
     ValidationResult,
 )
+from app.services.execution.router import ExecutionRouter
+from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -26,10 +25,11 @@ logger = logging.getLogger(__name__)
 class PythonDataFrameExecutor(Executor):
     """
     Executor for Python DataFrame query cells.
-    Parses and runs DataFrame commands (e.g. select, filter, limit) on uploaded datasets.
+    Parses and runs DataFrame commands (e.g. select, filter, limit) on datasets.
     """
 
     async def validate(self, request: CellExecuteRequest) -> ValidationResult:
+        import ast
         content = request.content.strip()
         if not content:
             return ValidationResult(
@@ -51,122 +51,97 @@ class PythonDataFrameExecutor(Executor):
         session = kwargs.get("session")
         context = request.context
 
-        # Load all datasets and detect references in request.content
-        datasets = []
-        dataset_frames = {}
-        plan_warnings = []
-
         datasource_id = context.get("connectionId")
         datasource = None
-        connection_config = {}
         
+        settings = get_settings()
+
+        # Resolve connection
+        if datasource_id:
+            datasource = next(
+                (item for item in settings.datasource.configured_connections if item.id == datasource_id),
+                None,
+            )
+            if not datasource and session:
+                from app.models.entities import DatasourceRecord
+                datasource = await session.get(DatasourceRecord, datasource_id)
+
+        connection_config = {}
+        if datasource:
+            if hasattr(datasource, "encrypted_password") and isinstance(datasource.encrypted_password, (str, bytes)):
+                from app.services.execution.pipeline import CredentialCipher
+                cipher = CredentialCipher(settings.app_credential_key)
+                password = cipher.decrypt(datasource.encrypted_password) if datasource.encrypted_password else ""
+                connection_config = {
+                    "host": datasource.host,
+                    "port": datasource.port,
+                    "username": datasource.username,
+                    "password": password,
+                    "database": datasource.database,
+                    "schema_name": datasource.schema_name,
+                }
+            else:
+                connection_config = {
+                    "host": datasource.host,
+                    "port": datasource.port,
+                    "username": getattr(datasource, "username", None),
+                    "password": getattr(datasource, "password", ""),
+                    "database": datasource.database,
+                    "schema_name": datasource.schema_name,
+                }
+
+        # Resolve local datasets
+        all_datasets = []
         if session:
             from app.models.entities import DatasetRecord
             from sqlalchemy import select
-
+            
             stmt = select(DatasetRecord)
             result = await session.execute(stmt)
             all_datasets = result.scalars().all()
 
-            # Start with context datasetIds if any
-            detected_dataset_ids = list(context.get("datasetIds", []))
+        # Detect referenced datasets
+        referenced_datasets = ExecutionRouter.detect_referenced_datasets(request.content, all_datasets)
 
-            # Scan command for dataset names
-            for ds in all_datasets:
-                clean_name = re.sub(r"[^a-zA-Z0-9_]", "_", ds.name)
-                stem_name = Path(ds.name).stem
-                clean_stem = re.sub(r"[^a-zA-Z0-9_]", "_", stem_name)
+        # Load dataframes for referenced datasets
+        dataset_frames = dict(context.get("dataset_frames", {}))
+        plan_warnings = []
+        
+        from app.services.storage.datasets import DatasetFileService
+        file_service = DatasetFileService(settings)
 
-                names_to_check = {
-                    ds.name,
-                    clean_name,
-                    stem_name,
-                    clean_stem,
-                    ds.name.lower(),
-                    clean_name.lower(),
-                    stem_name.lower(),
-                    clean_stem.lower(),
-                }
-
-                matched = False
-                for name in names_to_check:
-                    if not name:
-                        continue
-                    pattern = re.compile(rf"\b{re.escape(name)}\b", re.IGNORECASE)
-                    if pattern.search(request.content):
-                        matched = True
-                        break
-
-                if matched and ds.id not in detected_dataset_ids:
-                    detected_dataset_ids.append(ds.id)
-
-            # Load the identified datasets
-            if detected_dataset_ids:
-                stmt_loaded = select(DatasetRecord).where(DatasetRecord.id.in_(detected_dataset_ids))
-                loaded_result = await session.execute(stmt_loaded)
-                datasets = list(loaded_result.scalars().all())
-
-            from app.core.config import get_settings
-            from app.services.storage.datasets import DatasetFileService
-
-            settings = get_settings()
-            file_service = DatasetFileService(settings)
-
-            for dataset in datasets:
-                metadata = dataset.metadata_json or {}
-                try:
-                    frame = file_service.load_dataframe(
-                        dataset.location,
-                        limit=settings.execution.max_rows,
-                        delimiter=metadata.get("delimiter", ","),
-                        has_header=metadata.get("has_header", True),
-                    )
-                    dataset_frames[dataset.id] = frame
-                except Exception as e:
-                    logger.error(
-                        f"Failed to load dataset {dataset.name} from {dataset.location}: {e}",
-                        exc_info=True,
-                    )
-                    plan_warnings.append(f"Failed to load dataset '{dataset.name}': {e}")
-
-            if datasource_id:
-                datasource = next(
-                    (item for item in settings.datasource.configured_connections if item.id == datasource_id),
-                    None,
+        for dataset in referenced_datasets:
+            if dataset.id in dataset_frames or dataset.name in dataset_frames:
+                continue
+            metadata = dataset.metadata_json or {}
+            try:
+                frame = file_service.load_dataframe(
+                    dataset.location,
+                    limit=settings.execution.max_rows,
+                    delimiter=metadata.get("delimiter", ","),
+                    has_header=metadata.get("has_header", True),
                 )
-                if not datasource:
-                    from app.models.entities import DatasourceRecord
-                    datasource = await session.get(DatasourceRecord, datasource_id)
+                dataset_frames[dataset.id] = frame
+                dataset_frames[dataset.name] = frame
+            except Exception as e:
+                logger.error(f"Failed to load dataset {dataset.name}: {e}", exc_info=True)
+                plan_warnings.append(f"Failed to load dataset '{dataset.name}': {e}")
 
-                if datasource:
-                    if hasattr(datasource, "encrypted_password"):
-                        from app.services.execution.pipeline import CredentialCipher
-                        cipher = CredentialCipher(settings.app_credential_key)
-                        password = cipher.decrypt(datasource.encrypted_password) if datasource.encrypted_password else ""
-                        connection_config = {
-                            "host": datasource.host,
-                            "port": datasource.port,
-                            "username": datasource.username,
-                            "password": password,
-                            "database": datasource.database,
-                            "schema_name": datasource.schema_name,
-                        }
-                    else:
-                        connection_config = {
-                            "host": datasource.host,
-                            "port": datasource.port,
-                            "username": getattr(datasource, "username", None),
-                            "password": getattr(datasource, "password", ""),
-                            "database": datasource.database,
-                            "schema_name": datasource.schema_name,
-                        }
+        # Decide routing strategy
+        routed_engine = ExecutionRouter.route_execution(
+            cell_type=request.cell_type,
+            command=request.content,
+            datasource=datasource,
+            datasets_referenced=referenced_datasets,
+            context=context
+        )
 
         return ExecutionPlanV2(
-            engine="spark_dataframe",
+            engine=routed_engine,
             command=request.content.strip(),
             cell_type=request.cell_type,
             input_type=request.input_type,
-            datasets=datasets,
+            datasets=referenced_datasets,
             datasource=datasource,
             connection_config=connection_config,
             limit=context.get("limit", 100),
@@ -178,217 +153,137 @@ class PythonDataFrameExecutor(Executor):
         )
 
     async def execute(self, plan: ExecutionPlanV2) -> RawResult:
-        import asyncio
-        import json
-        import pandas as pd
-        import pyspark.sql
-        from pyspark.sql import SparkSession
-        import logging
-        logger = logging.getLogger(__name__)
-
-        from app.core.config import get_settings
+        from app.services.execution.adapters import AdapterRegistry
+        
         settings = get_settings()
 
-        if plan.datasource and plan.datasource.type.upper() in {"SPARK", "SPARK_SQL"}:
-            host = plan.connection_config.get("host") or "spark"
-            port = plan.connection_config.get("port") or 15002
-        else:
-            datasource = next(
-                (item for item in settings.datasource.configured_connections if item.id == "spark_local"),
-                None,
-            )
-            host = datasource.host if datasource else "spark"
-            port = datasource.port if datasource else 15002
+        # Setup config dict for the adapter
+        config = {
+            "datasets": plan.datasets,
+            "dataset_frames": plan.context.get("dataset_frames", {}),
+        }
 
-        remote = f"sc://{host}:{port}"
-
-        # 1. Establish the Spark Connect connection
-        try:
-            from app.services.execution.pipeline import _get_spark_connect_session
-            spark = await asyncio.to_thread(_get_spark_connect_session, remote, {})
-        except Exception as conn_exc:
-            logger.warning(f"Spark Connect connection failed: {conn_exc}. Falling back to local Pandas parser.", exc_info=True)
-            return await self._execute_fallback(plan, conn_exc)
-
-        # 2. Run user PySpark code
-        try:
-            frames = plan.context.get("dataset_frames", {})
-            globals_dict = {
-                "spark": spark,
-                "pyspark": pyspark,
-                "pd": pd,
-            }
-            locals_dict = {}
-
-            for dataset in plan.datasets:
-                frame = frames.get(dataset.id)
-                if frame is not None:
-                    await asyncio.to_thread(self._register_spark_dataset, spark, dataset.name, frame, locals_dict)
-
-            # Register PostgreSQL tables if any
-            p_logs = []
-            p_warnings = []
+        # Check if Spark connection is required/selected
+        if plan.engine == "spark_dataframe" or (plan.datasource and plan.datasource.type.upper() in {"SPARK", "SPARK_SQL"}):
+            datasource_type = "SPARK"
+            # If a postgres connection exists, pass it down as postgres_config for cross-source join in Spark
             if plan.datasource and plan.datasource.type.upper() in {"POSTGRESQL", "POSTGRES"}:
-                from app.services.execution.adapters import register_postgres_tables_in_spark
-                p_logs, p_warnings = await register_postgres_tables_in_spark(spark, plan.connection_config)
-                
-                # Make registered tables accessible in locals_dict as Spark DataFrames
-                try:
-                    def load_views_to_locals():
-                        for t in spark.catalog.listTables():
-                            locals_dict[t.name] = spark.table(t.name)
-                    await asyncio.to_thread(load_views_to_locals)
-                except Exception as e:
-                    logger.error(f"Failed to populate PySpark locals from catalog: {e}")
-
-            # Capture stdout & stderr while running user code
-            import sys
-            from io import StringIO
+                config["postgres_config"] = plan.connection_config
             
-            def run_pyspark():
-                import ast
-                code = plan.command.strip()
-                module = ast.parse(code)
-                if not module.body:
-                    return pd.DataFrame(), ""
+            # Setup Spark Connect parameters
+            if plan.datasource and plan.datasource.type.upper() in {"SPARK", "SPARK_SQL"}:
+                config["host"] = plan.connection_config.get("host")
+                config["port"] = plan.connection_config.get("port")
+            else:
+                # Local Spark fallback config
+                spark_local = next(
+                    (item for item in settings.datasource.configured_connections if item.id == "spark_local"),
+                    None,
+                )
+                config["host"] = spark_local.host if spark_local else "spark"
+                config["port"] = spark_local.port if spark_local else 15002
+        else:
+            # Local execution (Pandas) fallback
+            datasource_type = "SQLITE"
 
-                captured_stdout = StringIO()
-                old_stdout = sys.stdout
-                sys.stdout = captured_stdout
-                try:
-                    if isinstance(module.body[-1], ast.Expr):
-                        if len(module.body) > 1:
-                            statements = ast.Module(body=module.body[:-1], type_ignores=[])
-                            exec(compile(statements, filename="<string>", mode="exec"), globals_dict, locals_dict)
+        registry = AdapterRegistry()
+        adapter = registry.get_adapter(datasource_type)
+        plan_warnings = plan.context.get("warnings", [])
 
-                        expr = ast.Expression(body=module.body[-1].value)
-                        result = eval(compile(expr, filename="<string>", mode="eval"), globals_dict, locals_dict)
-                    else:
-                        exec(compile(module, filename="<string>", mode="exec"), globals_dict, locals_dict)
-                        result = None
-                        for val in reversed(list(locals_dict.values())):
-                            if isinstance(val, pyspark.sql.DataFrame) or (hasattr(val, "toPandas") and hasattr(val, "limit")):
-                                result = val
-                                break
-                finally:
-                    sys.stdout = old_stdout
-                
-                stdout_str = captured_stdout.getvalue()
+        # Timeout handling
+        timeout_ms = plan.context.get("timeout_ms") or settings.execution.timeout_ms
+        timeout_seconds = timeout_ms / 1000.0
 
-                if isinstance(result, pyspark.sql.DataFrame) or (hasattr(result, "toPandas") and hasattr(result, "limit")):
-                    df_limited = result.limit(plan.limit)
-                    pandas_frame = df_limited.toPandas()
-                    if pandas_frame.empty:
-                        pandas_frame = pd.DataFrame(columns=df_limited.columns)
-                    return pandas_frame, stdout_str
-                elif isinstance(result, pd.DataFrame):
-                    return result.head(plan.limit), stdout_str
-                else:
-                    return pd.DataFrame(), stdout_str
-
-            result_frame, stdout_logs = await asyncio.to_thread(run_pyspark)
-            schema = [{"name": name, "type": str(dtype)} for name, dtype in result_frame.dtypes.items()]
-            rows = json.loads(result_frame.to_json(orient="records", date_format="iso"))
-
-            logs = [
-                "Execution routed through PySpark execution engine.",
-                "Spark Session `spark` is available in context.",
-                f"Connected to remote Spark Connect server: {remote}"
-            ] + p_logs
-            if stdout_logs.strip():
-                logs.append("----- Captured stdout -----")
-                logs.extend(stdout_logs.strip().split("\n"))
-
-            return RawResult(
-                status="completed",
-                columns=list(result_frame.columns),
-                schema=schema,
-                rows=rows,
-                logs=logs,
-                warnings=p_warnings,
-                statistics={
-                    "engine": "spark_dataframe",
-                    "mode": "spark_connect",
-                    "returnedRows": len(rows),
-                }
-            )
-
-        except Exception as exc:
-            # Code execution failure (e.g. table not found, syntax error) - return the error directly
-            logger.error(f"Spark Connect code execution failed: {exc}", exc_info=True)
-            return RawResult(
-                status="failed",
-                error=str(exc),
-                logs=[
-                    f"Code execution failed on remote Spark Connect server: {exc}"
-                ] + p_logs,
-                warnings=p_warnings,
-            )
-
-    async def _execute_fallback(self, plan: ExecutionPlanV2, exc: Exception) -> RawResult:
-        from app.services.execution.pipeline import (
-            ExecutionPlan as LegacyExecutionPlan,
-            SparkDataFrameExecutor,
-        )
-
-        legacy_plan = LegacyExecutionPlan(
-            engine=plan.engine,
-            command=plan.command,
-            datasets=plan.datasets,
-            datasource_id=None,
-            datasource=None,
-            limit=plan.limit,
-            execution_mode="local",
-            context=plan.context,
-        )
-
-        executor = SparkDataFrameExecutor()
-        payload = await executor.execute(legacy_plan)
-
-        if payload.status == "failed":
-            return RawResult(
-                status="failed",
-                error=payload.error,
-                warnings=payload.warnings,
-                logs=payload.logs,
-            )
-
-        return RawResult(
-            status="completed",
-            columns=[col["name"] for col in payload.schema],
-            schema=payload.schema,
-            rows=payload.rows,
-            logs=[
-                f"Warning: Spark Connect connection failed ({exc}). Execution fell back to local Pandas mode.",
-            ] + payload.logs,
-            warnings=payload.warnings,
-            statistics={
-                **payload.statistics,
-                "dataframe_metadata": payload.dataframe_metadata,
-            },
-        )
-
-    def _register_spark_dataset(self, spark: SparkSession, name: str, frame: pd.DataFrame, locals_dict: dict) -> None:
-        import re
-        clean_name = re.sub(r'[^a-zA-Z0-9_]', '_', name)
         try:
-            spark_df = spark.createDataFrame(frame)
-            spark_df.createOrReplaceTempView(clean_name)
-            locals_dict[clean_name] = spark_df
-            if clean_name != name:
-                spark_df.createOrReplaceTempView(name)
-                locals_dict[name] = spark_df
+            await adapter.connect(config)
+            # Run DataFrame execution on the adapter with a timeout
+            result = await asyncio.wait_for(
+                adapter.execute_dataframe(plan.command, plan.limit),
+                timeout=timeout_seconds
+            )
+            if plan_warnings:
+                result.warnings = list(set(result.warnings + plan_warnings))
+            result.statistics["dataset_ids"] = [ds.id for ds in plan.datasets]
+            return result
+        except asyncio.TimeoutError:
+            logger.error(f"DataFrame execution timed out after {timeout_seconds}s (limit: {timeout_ms}ms)")
+            
+            # If Spark timed out, attempt to fallback to local Pandas execution
+            if datasource_type == "SPARK":
+                logger.info("Falling back to local Pandas execution after Spark Connect timeout.")
+                try:
+                    fallback_adapter = registry.get_adapter("SQLITE")
+                    await fallback_adapter.connect(config)
+                    result = await fallback_adapter.execute_dataframe(plan.command, plan.limit)
+                    result.logs = [
+                        "Warning: Spark Connect execution timed out.",
+                        f"Execution fell back to local Pandas mode."
+                    ] + result.logs
+                    if plan_warnings:
+                        result.warnings = list(set(result.warnings + plan_warnings))
+                    result.statistics["dataset_ids"] = [ds.id for ds in plan.datasets]
+                    return result
+                except Exception as fallback_exc:
+                    logger.error(f"Local Pandas fallback execution failed after Spark timeout: {fallback_exc}")
+
+            res = RawResult(
+                status="failed",
+                error=f"DataFrame execution timed out after {timeout_seconds} seconds.",
+                logs=[f"Execution exceeded timeout limit of {timeout_seconds}s."],
+                warnings=plan_warnings,
+            )
+            res.statistics["dataset_ids"] = [ds.id for ds in plan.datasets]
+            return res
         except Exception as e:
-            import logging
-            logging.getLogger(__name__).error(f"Failed to register Spark view for {name}: {e}")
+            logger.error(f"DataFrame execution failed: {e}", exc_info=True)
+            
+            # Fallback to local Pandas evaluation if Spark Connect failed to connect/execute
+            if datasource_type == "SPARK":
+                logger.info(f"Spark Connect execution failed: {e}. Falling back to local Pandas mode.")
+                try:
+                    fallback_adapter = registry.get_adapter("SQLITE")
+                    await fallback_adapter.connect(config)
+                    result = await fallback_adapter.execute_dataframe(plan.command, plan.limit)
+                    result.logs = [
+                        f"Warning: Spark Connect connection failed ({e}).",
+                        "Execution fell back to local Pandas mode."
+                    ] + result.logs
+                    if plan_warnings:
+                        result.warnings = list(set(result.warnings + plan_warnings))
+                    result.statistics["dataset_ids"] = [ds.id for ds in plan.datasets]
+                    return result
+                except Exception as fallback_exc:
+                    logger.error(f"Local Pandas fallback execution failed: {fallback_exc}")
+
+            res = RawResult(status="failed", error=str(e), warnings=plan_warnings)
+            res.statistics["dataset_ids"] = [ds.id for ds in plan.datasets]
+            return res
+        finally:
+            await adapter.disconnect()
 
     async def format_response(
         self, result: RawResult, request: CellExecuteRequest
     ) -> CellExecuteResponse:
+        # Determine duration
+        duration_ms = result.statistics.get("durationMs", 0)
+        
+        # Build structured error object if failed
+        formatted_error = None
+        if result.status == "failed" or result.error:
+            formatted_error = {
+                "code": "DATAFRAME_EXECUTION_ERROR",
+                "message": result.error or "Unknown DataFrame execution error occurred.",
+                "details": "; ".join(result.logs) if result.logs else "",
+                "hint": "Ensure the DataFrame command is valid Python and references a loaded dataset."
+            }
+
         return CellExecuteResponse(
+            success=result.status == "completed",
             execution_id="",
+            cell_id=request.context.get("cellId"),
+            mode=request.cell_type,
             status="SUCCESS" if result.status == "completed" else "FAILED",
-            execution_type="PYTHON_DATAFRAME",
+            execution_type=request.cell_type,
             result_type=result.result_type,
             columns=result.columns,
             schema=result.schema,
@@ -397,5 +292,8 @@ class PythonDataFrameExecutor(Executor):
             metadata=result.statistics,
             logs=result.logs,
             warnings=result.warnings,
-            error=result.error,
+            error=formatted_error if formatted_error else None,
+            duration_ms=duration_ms,
+            truncated=result.truncated,
+            dataset_ids=result.statistics.get("dataset_ids", []),
         )

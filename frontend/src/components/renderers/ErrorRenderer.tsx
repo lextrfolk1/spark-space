@@ -14,9 +14,32 @@ export function ErrorRenderer({ result, className }: RendererProps) {
           <p className="text-xs font-bold text-rose-400 uppercase tracking-wider mb-1.5">
             Execution Failed
           </p>
-          <pre className="text-xs text-rose-300/80 font-mono whitespace-pre-wrap break-words leading-relaxed">
-            {error}
-          </pre>
+          {typeof error === "object" && error !== null ? (
+            <div className="text-xs text-rose-300/80 font-mono space-y-1">
+              <div className="font-semibold text-rose-200">
+                {error.message || "An error occurred during execution."}
+              </div>
+              {error.code && (
+                <div className="text-[10px] text-rose-400/70 font-semibold uppercase">
+                  Error Code: {error.code}
+                </div>
+              )}
+              {error.details && (
+                <pre className="mt-1.5 p-2 bg-rose-950/20 border border-rose-950/30 rounded text-rose-400/90 whitespace-pre-wrap break-all leading-normal">
+                  {error.details}
+                </pre>
+              )}
+              {error.hint && (
+                <div className="mt-1.5 text-[11px] text-rose-400/60 italic leading-normal">
+                  Hint: {error.hint}
+                </div>
+              )}
+            </div>
+          ) : (
+            <pre className="text-xs text-rose-300/80 font-mono whitespace-pre-wrap break-words leading-relaxed">
+              {String(error)}
+            </pre>
+          )}
         </div>
       </div>
     </div>

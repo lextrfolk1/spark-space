@@ -60,6 +60,7 @@ class RawResult:
     statistics: dict[str, Any] = field(default_factory=dict)
     result_type: str = "TABLE"
     generated_query: str | None = None
+    truncated: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -113,11 +114,12 @@ class Executor(ABC):
         validation = await self.validate(request)
         if not validation.valid:
             return CellExecuteResponse(
+                success=False,
                 execution_id="",
                 status="FAILED",
                 execution_type=request.cell_type,
                 result_type="ERROR",
-                error="; ".join(validation.errors),
+                error=validation.errors[0] if validation.errors else "Validation failed",
                 warnings=validation.warnings,
                 logs=[f"Validation failed: {e}" for e in validation.errors],
             )
@@ -140,7 +142,7 @@ class DataSourceAdapter(ABC):
 
     To add a new data source:
     1. Create a new class that extends DataSourceAdapter
-    2. Implement connect(), execute_query(), get_schema(), disconnect()
+    2. Implement all abstract methods
     3. Register it in the AdapterRegistry
     """
 
@@ -150,13 +152,28 @@ class DataSourceAdapter(ABC):
         ...
 
     @abstractmethod
-    async def execute_query(self, query: str, limit: int = 100) -> RawResult:
-        """Execute a query against the data source."""
+    async def validate_connection(self) -> bool:
+        """Validate if connection parameters are correct and service is reachable."""
         ...
 
     @abstractmethod
     async def get_schema(self, table_name: str | None = None) -> list[dict[str, Any]]:
         """Get schema information for a table or the entire database."""
+        ...
+
+    @abstractmethod
+    async def register_with_spark(self, spark: Any, query: str | None = None) -> None:
+        """Expose/register this datasource as queryable view(s) in Spark Session."""
+        ...
+
+    @abstractmethod
+    async def execute_sql(self, query: str, limit: int = 100) -> RawResult:
+        """Execute a SQL query directly against the datasource."""
+        ...
+
+    @abstractmethod
+    async def execute_dataframe(self, command: str, limit: int = 100) -> RawResult:
+        """Execute a DataFrame/python command against the datasource."""
         ...
 
     @abstractmethod
@@ -168,3 +185,17 @@ class DataSourceAdapter(ABC):
     def supports(self, datasource_type: str) -> bool:
         """Check if this adapter supports the given datasource type."""
         ...
+
+    @abstractmethod
+    def supports_spark(self) -> bool:
+        """Check if this adapter supports registration with Spark."""
+        ...
+
+    @abstractmethod
+    def supports_direct_sql(self) -> bool:
+        """Check if this adapter supports direct SQL execution."""
+        ...
+
+    async def execute_query(self, query: str, limit: int = 100) -> RawResult:
+        """Backward compatibility helper."""
+        return await self.execute_sql(query, limit)

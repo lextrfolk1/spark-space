@@ -28,10 +28,15 @@ class ExecutionResponse(BaseModel):
     dataframe_metadata: dict[str, Any] = Field(default_factory=dict)
     logs: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
-    error: str | None = None
+    error: Any = None
     execution_time_ms: int
     statistics: dict[str, Any] = Field(default_factory=dict)
     dataset_ids: list[str] = Field(default_factory=list)
+    success: bool = True
+    cell_id: str | None = None
+    mode: str | None = None
+    duration_ms: int = 0
+    truncated: bool = False
 
 
 class ExecutionHistoryItem(BaseModel):

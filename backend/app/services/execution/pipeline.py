@@ -424,94 +424,93 @@ class ExecutionService:
 
     async def execute(self, session: AsyncSession, request: ExecutionRequest) -> ExecutionResponse:
         started = time.perf_counter()
-        parsed = self.parser.parse(request)
         
-        # Automatically detect referenced datasets (only if no datasource is selected)
-        detected_dataset_ids = [] if request.datasource_id is not None else list(request.dataset_ids)
-        if request.datasource_id is None:
-            all_datasets_stmt = select(DatasetRecord)
-            all_datasets_result = await session.execute(all_datasets_stmt)
-            all_datasets = all_datasets_result.scalars().all()
-            for ds in all_datasets:
-                pattern = re.compile(rf"\b{re.escape(ds.name)}\b", re.IGNORECASE)
-                if pattern.search(request.command) and ds.id not in detected_dataset_ids:
-                    detected_dataset_ids.append(ds.id)
-                
-        datasets = await self._load_datasets(session, detected_dataset_ids)
-        missing_dataset_ids = [dataset_id for dataset_id in request.dataset_ids if dataset_id not in {row.id for row in datasets}]
-        datasource = await self._load_datasource(session, request.datasource_id)
-        execution_limit = min(
-            request.limit or self.settings.execution.default_limit,
-            self.settings.execution.max_rows,
-        )
-        preview_context = await self._build_dataset_context(datasets)
-        log_book.add("execution", "info", f"Executing {request.engine} command in {request.execution_mode} mode")
-        if missing_dataset_ids:
-            payload = _failed_payload(
-                f"Requested dataset(s) were not found: {', '.join(missing_dataset_ids)}",
-                f"Unknown dataset id(s): {', '.join(missing_dataset_ids)}",
-                engine=request.engine,
-            )
-        elif request.datasource_id is not None and datasource is None:
-            payload = _failed_payload(
-                f"Requested datasource `{request.datasource_id}` was not found.",
-                f"Unknown datasource id: {request.datasource_id}",
-                engine=request.engine,
-            )
+        # Map request engine to cell type
+        engine_upper = request.engine.upper()
+        if "SQL" in engine_upper:
+            cell_type = "SQL"
+            input_type = "STRUCTURED_QUERY"
+        elif "DATAFRAME" in engine_upper:
+            cell_type = "PYTHON_DATAFRAME"
+            input_type = "DATAFRAME_COMMAND"
         else:
-            plan = ExecutionPlan(
-                engine=parsed.engine,
-                command=parsed.command,
-                datasets=datasets,
-                datasource_id=request.datasource_id,
-                datasource=datasource,
-                limit=execution_limit,
-                execution_mode=parsed.execution_mode,
-                context={**parsed.context, **preview_context, **self._build_datasource_context(datasource)},
-            )
-            payload = await self.registry.get_executor(request.engine).execute(plan)
-        duration_ms = int((time.perf_counter() - started) * 1000)
+            cell_type = request.engine.upper()
+            input_type = "STRUCTURED_QUERY"
 
+        # Build CellExecuteRequest
+        from app.schemas.notebooks import CellExecuteRequest
+        cell_request = CellExecuteRequest(
+            cellType=cell_type,
+            inputType=input_type,
+            content=request.command,
+            context={
+                "connectionId": request.datasource_id,
+                "datasetIds": request.dataset_ids,
+                "limit": request.limit,
+                "engine": request.engine,
+                "timeout_ms": request.timeout_ms,
+                **request.context
+            }
+        )
+
+        from app.services.execution.factory import get_executor_factory
+        factory = get_executor_factory()
+        executor = factory.get_executor(cell_request.cell_type, cell_request.input_type, cell_request.context)
+        
+        # Execute via the standard Executor run pipeline
+        cell_response = await executor.run(cell_request, session=session)
+        
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        
+        # Resolve error string format
+        error_msg = None
+        if cell_response.error:
+            if isinstance(cell_response.error, dict):
+                error_msg = cell_response.error.get("message")
+            else:
+                error_msg = str(cell_response.error)
+
+        status_record = "completed" if cell_response.status == "SUCCESS" else "failed"
+
+        # Build database ExecutionRecord
         record = ExecutionRecord(
             engine=request.engine,
-            dataset_id=detected_dataset_ids[0] if detected_dataset_ids else None,
+            dataset_id=request.dataset_ids[0] if request.dataset_ids else None,
             datasource_id=request.datasource_id,
             command=request.command,
-            status=payload.status,
+            status=status_record,
             duration_ms=duration_ms,
-            schema_json=payload.schema,
-            rows_json=payload.rows,
-            logs_json=payload.logs,
-            warnings_json=payload.warnings,
-            error_message=payload.error,
-            statistics_json=payload.statistics,
+            schema_json=cell_response.schema,
+            rows_json=cell_response.rows,
+            logs_json=cell_response.logs,
+            warnings_json=cell_response.warnings,
+            error_message=error_msg,
+            statistics_json=cell_response.metadata,
         )
         session.add(record)
         await session.commit()
         await session.refresh(record)
 
-        # Determine result type for the renderer framework
-        if payload.error:
-            result_type = "ERROR"
-        elif payload.rows:
-            result_type = "TABLE"
-        else:
-            result_type = "TEXT"
-
         return ExecutionResponse(
+            success=cell_response.success,
             execution_id=record.id,
-            status=payload.status,
-            result_type=result_type,
-            schema=payload.schema,
-            rows=payload.rows,
-            row_count=len(payload.rows),
-            dataframe_metadata=payload.dataframe_metadata,
-            logs=payload.logs,
-            warnings=payload.warnings,
-            error=payload.error,
+            cell_id=cell_request.context.get("cellId"),
+            mode=cell_request.cell_type,
+            status="SUCCESS" if cell_response.status == "SUCCESS" else "FAILED",
+            result_type=cell_response.result_type,
+            generated_query=cell_response.generated_query,
+            schema=cell_response.schema,
+            rows=cell_response.rows,
+            row_count=cell_response.row_count,
+            dataframe_metadata=cell_response.metadata.get("dataframe_metadata", {}),
+            logs=cell_response.logs,
+            warnings=cell_response.warnings,
+            error=cell_response.error,
             execution_time_ms=duration_ms,
-            statistics=payload.statistics,
-            dataset_ids=detected_dataset_ids,
+            statistics=cell_response.metadata,
+            dataset_ids=cell_response.dataset_ids,
+            duration_ms=duration_ms,
+            truncated=cell_response.truncated
         )
 
     async def history(self, session: AsyncSession) -> list[ExecutionRecord]:

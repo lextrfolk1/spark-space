@@ -122,7 +122,7 @@ export type CellExecuteResponse = {
   metadata: Record<string, unknown>;
   logs: string[];
   warnings: string[];
-  error?: string | null;
+  error?: any | null;
 };
 
 // ---------------------------------------------------------------------------
@@ -209,7 +209,7 @@ export type ExecutionResult = {
   dataframe_metadata: Record<string, unknown>;
   logs: string[];
   warnings: string[];
-  error?: string | null;
+  error?: any | null;
   execution_time_ms: number;
   statistics: Record<string, unknown>;
   dataset_ids?: string[];

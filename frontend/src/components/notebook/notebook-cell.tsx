@@ -331,7 +331,15 @@ export function NotebookCellView({ cell, datasets, datasources, onChange, onDele
             <div>
               {result?.error && (
                 <div className="rounded-lg border border-rose-500/20 bg-rose-500/[0.04] p-2.5 text-xs font-mono text-rose-400 whitespace-pre-wrap mb-2">
-                  {result.error}
+                  {typeof result.error === "object" && result.error !== null ? (
+                    <div className="space-y-1">
+                      <div className="font-semibold text-rose-300">{result.error.message || "An error occurred."}</div>
+                      {result.error.details && <div className="text-[11px] text-rose-400/80 mt-1">{result.error.details}</div>}
+                      {result.error.hint && <div className="text-[11px] text-rose-400/60 italic mt-1">Hint: {result.error.hint}</div>}
+                    </div>
+                  ) : (
+                    String(result.error)
+                  )}
                 </div>
               )}
               {result?.rows && result.rows.length > 0 && (
